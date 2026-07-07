@@ -1,0 +1,7 @@
+Title: Setup Guide.
+
+Install the tool with npm install -g herald and run it.
+
+Code block omitted.
+
+The -- rate flag controls speed.

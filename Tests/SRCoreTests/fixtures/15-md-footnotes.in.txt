@@ -1,0 +1,8 @@
+# Draft Notes
+
+The claim[^1] needs support. Another point[^note] too.
+
+[^1]: See the appendix for data.
+[^note]: Discussed in section two.
+
+Some <em>inline HTML</em> and a <br> tag here.

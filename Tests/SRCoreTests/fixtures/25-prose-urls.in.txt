@@ -1,0 +1,4 @@
+Read more at go.nature.com/4rzrnyx today. The docs live at
+docs.example.io/getting-started and the source at github.com/user/repo.
+Full reference: https://www.example.org/long/path?query=1 which redirects.
+Contact us via info@example.com anytime.

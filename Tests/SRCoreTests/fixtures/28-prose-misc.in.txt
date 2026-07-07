@@ -1,0 +1,5 @@
+About ½ of the samples showed effects, and ¼ failed entirely.
+The rule x <= y holds while a >= b fails. We set p = 0.05 exactly.
+Miller planes (111), (200), and (220) appeared. The peaks (110)
+dominated diffraction. Water H2O and CO2 levels rose ~5 units.
+The range 10–20 spans values… precisely.

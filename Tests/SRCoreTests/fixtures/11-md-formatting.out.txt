@@ -1,0 +1,5 @@
+Title: Style Test.
+
+This has bold text, italic text, underscore bold, underscore italic, and struck through words.
+
+A bold with nested italic inside case too.

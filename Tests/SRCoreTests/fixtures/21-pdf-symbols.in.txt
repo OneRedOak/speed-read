@@ -1,0 +1,4 @@
+The reaction A → B proceeds when T ≈ 300 K. We require x ≥ 0
+and p ± 2 uncertainty. The state ⟨ψ|H|ψ⟩ gives the energy.
+Since ℏ is small, quantum effects vanish. The angle was 45° at 20 °C.
+For all x ∈ S, the union A ∪ B covers ∞ many cases.

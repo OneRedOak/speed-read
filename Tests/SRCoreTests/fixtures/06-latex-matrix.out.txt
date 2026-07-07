@@ -1,0 +1,1 @@
+Section: Linear Algebra. The system is governed by The equation: A equals the matrix with rows: 1, 2; 3, 4. and the piecewise map The equation: f of x equals cases: x squared, x greater than or equal to 0; -x, x less than 0. The aligned equations: a equals b plus c; d equals e minus f.

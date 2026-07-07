@@ -1,0 +1,9 @@
+\section{Stress Test}
+Consider $\sqrt[3]{x}$ and $\left(\frac{a+b}{c}\right)^{2}$ with $\mathbb{R}$ and $\mathcal{O}(n \log n)$.
+The sum $\sum_{i=1}^{N} x_i$ and the limit $\lim_{x \to 0} \frac{\sin x}{x} = 1$ both appear.
+\begin{gather}
+a = b \\
+c = d^{\dagger}
+\end{gather}
+We write $\vec{F} = m\ddot{x}$ and $\hat{H}\psi = E\psi$, plus $x \cdots y$ and $A^{T}$.
+The integral $\int_0^\infty e^{-x}\,dx$ converges\footnote{By dominated convergence.}.

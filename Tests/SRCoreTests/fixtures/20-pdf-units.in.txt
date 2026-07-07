@@ -1,0 +1,4 @@
+The laser operated at 5 kHz with power of 30 mW and wavelength 632 nm.
+We added 10 mg/mL of solution at 25 °C under 2 atm of pressure.
+The resistance was 50 Ω with current 3 mA. A 10 µm gap and 5 µL
+volume were used. Flow was 3 m/s over 2 km.

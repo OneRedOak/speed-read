@@ -1,0 +1,9 @@
+Title: Physics Notes.
+
+Some key relations below.
+
+The energy relation E equals m c squared holds everywhere.
+
+ The equation: x squared plus y squared equals r squared.
+
+Inline math a sub n plus b sub n appears mid-sentence.

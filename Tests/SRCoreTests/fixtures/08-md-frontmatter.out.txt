@@ -1,0 +1,7 @@
+Title: Weekly Review.
+
+This week focused on model training and evaluation.
+
+Section: Progress.
+
+The loss curve improved steadily.

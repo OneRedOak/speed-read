@@ -1,0 +1,4 @@
+\section{History}
+The method of Schr\"odinger and Poincar\'e built on G\"odel's work.
+\textit{Emphasis} and \textbf{boldness} matter, as noted by M\"uller.
+The caf\'e discussion---a long one---covered 50--60 topics.

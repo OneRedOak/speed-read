@@ -1,0 +1,13 @@
+# Results Summary
+
+| Model | Accuracy |
+|-------|----------|
+| A     | 91%      |
+| B     | 94%      |
+
+> [!note] Key Finding
+> Model B wins consistently.
+> Margin is 3 points.
+
+> A plain blockquote line.
+> Second line of quote.

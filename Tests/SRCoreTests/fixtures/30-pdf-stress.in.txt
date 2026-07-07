@@ -1,0 +1,6 @@
+The angle was 45°30′ and the arc spanned 12′30″ overall. The alloy
+contained 5 wt% carbon and 3 at% boron. A 10 µΩ resistance and
+2 µF capacitance were measured at 1.5 GPa and 3 mmHg. The sample
+grew 5 µm/s under 10 kV/cm bias. Rotation reached 3000 rpm at
+120 dB noise. Values of 3 ppm and 7 ppbv were typical. DNA has 5'
+and 3' ends over 100 bp segments.

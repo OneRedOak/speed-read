@@ -1,0 +1,5 @@
+Title: Reading List.
+
+See the original paper for details. Related: Attention Is All You Need and my notes.
+
+Image: Architecture diagram. Image.

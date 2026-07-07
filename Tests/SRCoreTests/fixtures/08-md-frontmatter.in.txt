@@ -1,0 +1,11 @@
+---
+title: Weekly Notes
+tags: [research, notes]
+---
+# Weekly Review
+
+This week focused on **model training** and *evaluation*.
+
+## Progress
+
+The loss curve improved steadily. #ml #progress

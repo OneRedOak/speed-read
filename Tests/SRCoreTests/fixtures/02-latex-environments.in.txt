@@ -1,0 +1,16 @@
+\begin{abstract}
+We study the dynamics of coupled oscillators.
+\end{abstract}
+\begin{theorem}[Stability]
+Every bounded solution converges.
+\end{theorem}
+\begin{proof}
+The result follows from $V(x) > 0$.
+\end{proof}
+\begin{itemize}
+\item First point about convergence.
+\item Second point about stability.
+\end{itemize}
+\begin{equation}\label{eq:energy}
+E = \hbar \omega
+\end{equation}

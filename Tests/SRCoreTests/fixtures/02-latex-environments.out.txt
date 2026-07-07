@@ -1,0 +1,1 @@
+Abstract. We study the dynamics of coupled oscillators. Theorem Stability. Every bounded solution converges. Proof. The result follows from V of x greater than 0. End of proof. First point about convergence. Second point about stability. Equation energy: E equals h-bar omega.

@@ -1,0 +1,6 @@
+\section{Measurements}
+The sample was heated to \SI{300}{\kelvin} and held for a long time.
+A field of \SI{1.5e-3}{\tesla} was applied at \SI{25}{\degree\Celsius}.
+The rate constant is \SI{4.7e8}{\per\second} with density \SI{1}{\gram\per\liter}.
+We measured \si{\milli\meter} precision and \num{3.14\pm0.02} agreement.
+The reaction \ce{2H2 + O2 -> 2H2O} proceeds rapidly.

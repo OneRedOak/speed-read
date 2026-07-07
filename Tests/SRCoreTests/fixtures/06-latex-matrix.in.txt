@@ -1,0 +1,11 @@
+\section{Linear Algebra}
+The system is governed by
+\begin{equation}
+A = \begin{pmatrix} 1 & 2 \\ 3 & 4 \end{pmatrix}
+\end{equation}
+and the piecewise map
+$$f(x) = \begin{cases} x^2 & x \geq 0 \\ -x & x < 0 \end{cases}$$
+\begin{align}
+a &= b + c \\
+d &= e - f
+\end{align}

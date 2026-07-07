@@ -1,0 +1,6 @@
+\newcommand{\vect}[1]{\mathbf{#1}}
+\newcommand{\R}{\mathbb{R}}
+\def\eps{\epsilon}
+\section{Definitions}
+Let $\vect{x} \in \R^n$ and choose $\eps > 0$.
+The map $f: \R \to \R$ preserves $\vect{v}$.

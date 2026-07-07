@@ -1,0 +1,4 @@
+About one half of the samples showed effects, and one quarter failed entirely.
+The rule x less than or equal to y holds while a greater than or equal to b fails. We set p equals 0.05 exactly.
+Miller planes (1 1 1), (2 0 0), and (2 2 0) appeared. The peaks (1 1 0) dominated diffraction. Water water and carbon dioxide levels rose approximately 5 units.
+The range 10 to 20 spans values... precisely.

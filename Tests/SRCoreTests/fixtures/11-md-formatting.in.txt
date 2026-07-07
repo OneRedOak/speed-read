@@ -1,0 +1,5 @@
+# Style Test
+
+This has **bold text**, *italic text*, __underscore bold__, _underscore italic_, and ~~struck through~~ words.
+
+A **bold with *nested italic* inside** case too.

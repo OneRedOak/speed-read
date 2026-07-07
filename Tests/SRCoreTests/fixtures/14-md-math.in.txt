@@ -1,0 +1,9 @@
+# Physics Notes
+
+Some **key relations** below.
+
+The energy relation $E = mc^2$ holds everywhere.
+
+$$x^2 + y^2 = r^2$$
+
+Inline math $a_n + b_n$ appears mid-sentence.

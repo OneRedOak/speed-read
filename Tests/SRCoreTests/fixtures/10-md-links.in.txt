@@ -1,0 +1,7 @@
+# Reading List
+
+See [the original paper](https://example.org/paper.pdf) for details.
+Related: [[Attention Is All You Need]] and [[transformer-notes|my notes]].
+
+![Architecture diagram](images/arch.png)
+![[screenshot.png]]

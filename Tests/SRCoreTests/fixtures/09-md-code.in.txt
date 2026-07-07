@@ -1,0 +1,10 @@
+# Setup Guide
+
+Install the tool with `npm install -g herald` and run it.
+
+```bash
+herald speak "hello world"
+echo done
+```
+
+The `--rate` flag controls speed.

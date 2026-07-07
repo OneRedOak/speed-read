@@ -1,0 +1,6 @@
+\section{Related Work}
+Prior studies \citep{jones2019} established the baseline, see also \citet{brown2021}.
+As shown in \ref{fig:setup} and \eqref{eq:main}, the effect is strong.
+\label{sec:related}
+See \href{https://example.org/paper}{the full paper} and \url{https://example.org}.
+The proof\footnote{Details in the appendix.} is omitted.

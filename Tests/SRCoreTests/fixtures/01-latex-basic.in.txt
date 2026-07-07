@@ -1,0 +1,5 @@
+\section{Introduction}
+The energy is given by $E = mc^2$ where $m$ is the mass.
+We find $\alpha + \beta = \gamma$ and the ratio $\frac{a}{b}$.
+\subsection{Methods}
+As shown in \cite{smith2020}, the value of $\lambda$ exceeds half of the total.

@@ -1,0 +1,5 @@
+The rate was 1.5 × 10⁻³ per second, while the density reached
+3.2 x 10^5 particles. The value 10⁻⁹ was negligible.
+Samples of ²³⁵U and ¹⁴C were prepared. The signal at 3200 cm⁻¹
+confirmed bonding. The area scaled as r² and volume as r³.
+The constant is 2.5179(4) in natural units.
