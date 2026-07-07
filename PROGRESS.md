@@ -9,7 +9,7 @@ PRD: see conversation / repo root. Reference implementation cloned at `reference
 | Q-1 Name | **sr** — CLI `sr`, bundle `com.patrickellis.sr`, Keychain item "sr — ElevenLabs API Key", storage `~/Library/Application Support/sr/` |
 | Q-2 macOS floor | 14+ (dev machine runs macOS 26.5; no constraint) |
 | Q-3 Hotkey dep | `sindresorhus/KeyboardShortcuts` (1 of 2 SPM budget) |
-| Q-4 History-ID | Header-first: read `history-item-id` response header from TTS response; fallback to `GET /v1/history?page_size=1` match. **Live verification pending** (needs API key in Keychain). `DELETE /v1/history/{history_item_id}` confirmed in docs. |
+| Q-4 History-ID | **Live-verified 2026-07-06**: streaming TTS response carries `history-item-id` header (also `character-cost` — use it for exact C-1/C-2 accounting instead of estimating). `DELETE /v1/history/{id}` returns 200 `{"status":"ok"}`; history confirmed empty afterwards. Header-first, list-fallback. |
 | Q-5 Pause semantics | Primary hotkey ⌥⇧/ = speak/stop; secondary ⌥⇧. = pause/resume (per PRD F-2, revisit after use) |
 | Q-6 Public release | Undecided; keeping CHANGELOG from day one, code written for strangers |
 | Build toolchain | Pure SwiftPM + `scripts/build-app.sh` assembling `sr.app` (only CLT installed, no Xcode — works; signing/notarization deferred to Phase 3) |
@@ -39,7 +39,7 @@ PRD: see conversation / repo root. Reference implementation cloned at `reference
 ## Status
 
 - [x] Phase 0 — recon, audit, decisions (this file)
-- [ ] Phase 0 spike B — live API history-item-id verification (**blocked on user putting key in Keychain**)
+- [x] Phase 0 spike B — live verification complete: header present, delete works, history empty after delete. Note: current key is on the free tier (10k chars/mo) and was exposed in the setup conversation — rotate before real use.
 - [x] Phase 1 code — F-1, F-2, F-3 (ElevenLabs only), F-4 (30/30 parity fixtures), F-5, F-6 minimal, F-8, P-1, P-2, P-3, P-4 (refusal in capture path), P-5, P-11. `dist/sr.app` builds + launches.
 - [ ] Phase 1 acceptance — end-to-end speak blocked on: user grants Accessibility to sr.app; user adds ElevenLabs key to Keychain. Then: T-1 capture matrix spot-check, T-2 clipboard integrity, live spike B (history-item-id header).
 - [ ] Phase 2 — privacy hardening + Kokoro + cache
