@@ -45,7 +45,16 @@ cat > "$BUNDLE_DIR/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-# Ad-hoc sign so macOS TCC identity is stable across rebuilds.
-codesign --force --deep --sign - "$BUNDLE_DIR"
+# Sign with the local "sr-dev" certificate when present: unlike ad-hoc
+# signing (whose identity is the per-build binary hash), a real certificate
+# gives a stable designated requirement, so the Accessibility grant survives
+# rebuilds. Falls back to ad-hoc if the cert is missing (grant re-prompts
+# after every rebuild in that case). Phase 3 replaces this with Developer ID.
+if security find-identity -v -p codesigning 2>/dev/null | grep -q '"sr-dev"'; then
+  codesign --force --deep --sign "sr-dev" "$BUNDLE_DIR"
+else
+  echo "warning: sr-dev cert not found — ad-hoc signing (TCC grants won't survive rebuilds)" >&2
+  codesign --force --deep --sign - "$BUNDLE_DIR"
+fi
 
 echo "Built $BUNDLE_DIR"

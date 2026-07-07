@@ -200,7 +200,7 @@ struct MenuView: View {
             Button {
                 state.promptForAccessibility()
             } label: {
-                Label("Enable Accessibility for hotkeys", systemImage: "exclamationmark.triangle")
+                Label("Grant Accessibility (reads your selection)", systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.orange)
             }
             .buttonStyle(.borderless)
