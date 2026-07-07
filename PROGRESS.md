@@ -40,11 +40,13 @@ PRD: see conversation / repo root. Reference implementation cloned at `reference
 
 - [x] Phase 0 — recon, audit, decisions (this file)
 - [ ] Phase 0 spike B — live API history-item-id verification (**blocked on user putting key in Keychain**)
-- [ ] Phase 1 — MVP: F-1, F-2, F-3 (ElevenLabs only), F-4, F-5, F-6 minimal, F-8, P-1, P-2, P-3, P-5, P-11 — in progress
+- [x] Phase 1 code — F-1, F-2, F-3 (ElevenLabs only), F-4 (30/30 parity fixtures), F-5, F-6 minimal, F-8, P-1, P-2, P-3, P-4 (refusal in capture path), P-5, P-11. `dist/sr.app` builds + launches.
+- [ ] Phase 1 acceptance — end-to-end speak blocked on: user grants Accessibility to sr.app; user adds ElevenLabs key to Keychain. Then: T-1 capture matrix spot-check, T-2 clipboard integrity, live spike B (history-item-id header).
 - [ ] Phase 2 — privacy hardening + Kokoro + cache
 - [ ] Phase 3 — transport polish, sign/notarize, v1.0
 - [ ] Phase 4 — automations (CLI → Shortcuts → MCP → scheme)
 
 ## Deviations from PRD
 
-- None yet.
+- **Normalizer** (documented in `Normalizer.swift`): no ftfy mojibake repair (no Swift equivalent; clipboard text is valid UTF-8); LaTeX accents use the reference's fallback table rather than pylatexenc. 30/30 parity fixtures pass byte-for-byte with these deviations baked into fixture generation.
+- **Toolchain**: CLT-only (no Xcode) → KeyboardShortcuts pinned to 1.15.0 (newer tags use #Preview macros that need Xcode's plugin) and tests use Swift Testing, not XCTest (`make test` wires the framework paths). Revisit both when Xcode is installed for Phase 3 signing.
