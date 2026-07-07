@@ -43,11 +43,12 @@ struct MenuView: View {
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            transportRow
-            progressRow
-            speedRow
+        VStack(alignment: .leading, spacing: 12) {
+            transportCluster
+            progressSection
+            speedSection
             Divider()
+            speakClipboardButton
             backendPicker
             voicePickers
             Divider()
@@ -57,86 +58,77 @@ struct MenuView: View {
             bottomRow
         }
         .padding(14)
-        .frame(width: 320, alignment: .leading)
+        .frame(width: 336, alignment: .leading)
         .onAppear { state.refreshVoices() }
     }
 
-    // MARK: Transport (F-7 subset)
+    // MARK: Transport (F-7) — the panel's hero: open menu → hit a control
+    // in one motion. Big central play/pause, generous circular hit areas,
+    // hover rings for click confidence.
 
-    private var transportRow: some View {
-        HStack(spacing: 12) {
-            Group {
-                Button {
-                    state.playback.restart()
-                } label: {
-                    Image(systemName: "backward.end.fill")
-                }
-                .help("Restart from the top")
-
-                Button {
-                    state.playback.seek(by: -5)
-                } label: {
-                    Image(systemName: "gobackward.5")
-                        .imageScale(.large)
-                }
-                .help("Back 5 seconds")
-
-                Button {
-                    state.playback.togglePauseResume()
-                } label: {
-                    Image(systemName: isPaused ? "play.fill" : "pause.fill")
-                        .imageScale(.large)
-                }
-                .help(isPaused ? "Resume" : "Pause")
-
-                Button {
-                    state.playback.seek(by: 5)
-                } label: {
-                    Image(systemName: "goforward.5")
-                        .imageScale(.large)
-                }
-                .help("Forward 5 seconds")
-
-                Button {
-                    state.stop()
-                } label: {
-                    Image(systemName: "stop.fill")
-                }
-                .help("Stop")
+    private var transportCluster: some View {
+        HStack(spacing: 6) {
+            Spacer(minLength: 0)
+            TransportButton(systemName: "backward.end.fill",
+                            size: 30, iconSize: 11,
+                            help: "Restart from the top") {
+                state.playback.restart()
             }
-            .disabled(!state.playback.isActive)
-
-            Spacer()
-
-            Button("Speak Clipboard") {
-                state.speakClipboard()
+            TransportButton(systemName: "gobackward.5",
+                            size: 38, iconSize: 17,
+                            help: "Back 5 seconds") {
+                state.playback.seek(by: -5)
             }
+            TransportButton(systemName: isPaused || !state.playback.isActive
+                                ? "play.fill" : "pause.fill",
+                            size: 46, iconSize: 19, prominent: true,
+                            help: isPaused ? "Resume" : "Pause") {
+                state.playback.togglePauseResume()
+            }
+            TransportButton(systemName: "goforward.5",
+                            size: 38, iconSize: 17,
+                            help: "Forward 5 seconds") {
+                state.playback.seek(by: 5)
+            }
+            TransportButton(systemName: "stop.fill",
+                            size: 30, iconSize: 11,
+                            help: "Stop") {
+                state.stop()
+            }
+            Spacer(minLength: 0)
         }
-        .buttonStyle(.borderless)
+        .disabled(!state.playback.isActive)
     }
 
     private var isPaused: Bool { state.playback.state == .paused }
 
-    private var progressRow: some View {
-        Group {
-            if state.playback.state == .idle {
-                Text("Select text, press \(shortcutHint)")
-            } else {
-                playbackProgressRow
+    @ViewBuilder
+    private var progressSection: some View {
+        if state.playback.isActive {
+            VStack(spacing: 4) {
+                ProgressView(value: min(state.playback.currentSeconds,
+                                        state.playback.availableSeconds),
+                             total: max(state.playback.availableSeconds, 0.01))
+                    .progressViewStyle(.linear)
+                    .controlSize(.small)
+                    .tint(.accentColor)
+                HStack(spacing: 6) {
+                    if state.playback.state == .paused {
+                        Text("Paused").fontWeight(.medium)
+                    }
+                    Text("Sentence \(state.playback.currentSentence + 1) of \(state.playback.totalSentences)")
+                    Spacer()
+                    Text("\(timeString(state.playback.currentSeconds)) / \(timeString(state.playback.availableSeconds))")
+                        .monospacedDigit()
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
-        }
-        .font(.caption).foregroundStyle(.secondary)
-    }
-
-    private var playbackProgressRow: some View {
-        HStack(spacing: 6) {
-            if state.playback.state == .paused {
-                Text("Paused")
-            }
-            Text("Sentence \(state.playback.currentSentence + 1) of \(state.playback.totalSentences)")
-            Spacer()
-            Text("\(timeString(state.playback.currentSeconds)) / \(timeString(state.playback.availableSeconds))")
-                .monospacedDigit()
+        } else {
+            Text("Select text anywhere, then press \(shortcutHint)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 
@@ -149,17 +141,40 @@ struct MenuView: View {
         KeyboardShortcuts.getShortcut(for: .speakOrStop)?.description ?? "the hotkey (unset)"
     }
 
-    // MARK: Speed (F-8)
+    // MARK: Speed (F-8) — slider for fine control, chips for the speeds
+    // you actually use without needing slider precision.
 
-    private var speedRow: some View {
-        HStack {
-            Image(systemName: "tortoise").imageScale(.small)
-            Slider(value: $state.playbackRate, in: 0.5...3.0, step: 0.1)
-            Image(systemName: "hare").imageScale(.small)
-            Text(String(format: "%.1f×", state.playbackRate))
-                .font(.caption.monospacedDigit())
-                .frame(width: 34, alignment: .trailing)
+    private var speedSection: some View {
+        VStack(spacing: 6) {
+            HStack {
+                Image(systemName: "tortoise").imageScale(.small)
+                    .foregroundStyle(.secondary)
+                Slider(value: $state.playbackRate, in: 0.5...3.0, step: 0.1)
+                Image(systemName: "hare").imageScale(.small)
+                    .foregroundStyle(.secondary)
+                Text(String(format: "%.1f×", state.playbackRate))
+                    .font(.caption.monospacedDigit().weight(.medium))
+                    .frame(width: 34, alignment: .trailing)
+            }
+            HStack(spacing: 6) {
+                ForEach([1.0, 1.25, 1.5, 2.0], id: \.self) { preset in
+                    SpeedChip(value: preset,
+                              isActive: abs(state.playbackRate - preset) < 0.05) {
+                        state.playbackRate = preset
+                    }
+                }
+            }
         }
+    }
+
+    private var speakClipboardButton: some View {
+        Button {
+            state.speakClipboard()
+        } label: {
+            Label("Speak Clipboard", systemImage: "doc.on.clipboard")
+                .frame(maxWidth: .infinity)
+        }
+        .controlSize(.large)
     }
 
     // MARK: Backend & voices (F-3, P-8 Local-Only)
@@ -223,7 +238,7 @@ struct MenuView: View {
                 .help("Disable for sensitive sessions — nothing is written to disk")
             if !state.historyStatus.isEmpty {
                 Text(state.historyStatus)
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption2).foregroundStyle(.tertiary)
             }
         }
         .font(.callout)
@@ -258,14 +273,14 @@ struct MenuView: View {
         }
         HStack(spacing: 4) {
             if let remaining = state.creditsRemaining, let limit = state.creditsLimit {
-                Text("Credits: \(remaining.formatted()) / \(limit.formatted())")
+                Text("Credits \(remaining.formatted()) / \(limit.formatted())")
             }
             let spent = state.ledger.spentToday
             if spent > 0 {
-                Text("· today: \(spent.formatted())")
+                Text("· \(spent.formatted()) today")
             }
         }
-        .font(.caption).foregroundStyle(.secondary)
+        .font(.caption2).foregroundStyle(.tertiary)
     }
 
     private var bottomRow: some View {
@@ -285,6 +300,84 @@ struct MenuView: View {
             }
         }
         .buttonStyle(.borderless)
+    }
+}
+
+// MARK: - Transport components
+
+/// Circular transport control with a hover ring and a full-circle hit area.
+/// `prominent` renders as the accent-filled hero (play/pause).
+private struct TransportButton: View {
+    let systemName: String
+    var size: CGFloat = 36
+    var iconSize: CGFloat = 15
+    var prominent = false
+    let help: String
+    let action: () -> Void
+
+    @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                if prominent {
+                    Circle().fill(Color.accentColor)
+                    if hovering && isEnabled {
+                        Circle().fill(.white.opacity(0.15))
+                    }
+                } else if hovering && isEnabled {
+                    Circle().fill(.quaternary)
+                }
+                Image(systemName: systemName)
+                    .font(.system(size: iconSize, weight: .semibold))
+                    .foregroundStyle(prominent ? AnyShapeStyle(.white)
+                                               : AnyShapeStyle(.primary))
+            }
+            .frame(width: size, height: size)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .opacity(isEnabled ? 1 : 0.35)
+        .onHover { hovering = $0 }
+        .help(help)
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+/// One-click speed preset.
+private struct SpeedChip: View {
+    let value: Double
+    let isActive: Bool
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(label)
+                .font(.caption.monospacedDigit().weight(isActive ? .semibold : .regular))
+                .padding(.horizontal, 9)
+                .padding(.vertical, 3)
+                .background(
+                    Capsule().fill(isActive
+                        ? AnyShapeStyle(Color.accentColor.opacity(0.25))
+                        : hovering ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear))
+                )
+                .overlay(
+                    Capsule().strokeBorder(
+                        isActive ? Color.accentColor.opacity(0.6) : Color.secondary.opacity(0.25),
+                        lineWidth: 1)
+                )
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    }
+
+    private var label: String {
+        value == value.rounded() ? String(format: "%.0f×", value)
+                                 : String(format: "%.2g×", value)
     }
 }
 
