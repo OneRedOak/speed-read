@@ -99,6 +99,16 @@ final class AppState: ObservableObject {
         refreshCredits()
         refreshVoices()
 
+        // Resume history deletions that were pending when the app last quit.
+        if let ids = UserDefaults.standard.stringArray(forKey: Self.pendingDeletesKey),
+           !ids.isEmpty {
+            UserDefaults.standard.removeObject(forKey: Self.pendingDeletesKey)
+            let janitor = janitor
+            Task {
+                for id in ids { await janitor.enqueue(id) }
+            }
+        }
+
         // Startup cache maintenance (TTL sweep + LRU).
         Task.detached(priority: .utility) {
             AudioCache.shared.evictIfNeeded()
@@ -114,11 +124,25 @@ final class AppState: ObservableObject {
         }
     }
 
+    private nonisolated static let pendingDeletesKey = "pendingHistoryDeletes"
+
     func shutdown() {
         stop()
+        // Persist not-yet-completed history deletions across quits (IDs are
+        // opaque provider tokens — content-free). Re-enqueued at next launch.
+        let janitor = janitor
+        Task.detached {
+            let ids = await janitor.pendingIDs
+            if ids.isEmpty {
+                UserDefaults.standard.removeObject(forKey: Self.pendingDeletesKey)
+            } else {
+                UserDefaults.standard.set(ids, forKey: Self.pendingDeletesKey)
+            }
+        }
         Task { await KokoroRuntime.shared.supervisor.stop() }
-        // Give the SIGTERM a moment; the daemon's parent watchdog is the backstop.
-        usleep(200_000)
+        // Give the SIGTERM + persistence tasks a moment; the daemon's parent
+        // watchdog is the backstop.
+        usleep(300_000)
     }
 
     // MARK: - Primary flows

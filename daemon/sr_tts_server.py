@@ -372,6 +372,14 @@ def main():
     with open(PID_FILE, "w") as f:
         f.write(str(os.getpid()))
 
+    # Publish the auth token — only AFTER winning the flock, so a losing
+    # contender can never overwrite the live daemon's token with its own
+    # (Swift clients read this file; the daemon is the single writer).
+    token_path = os.path.join(DATA_DIR, "daemon.token")
+    fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(AUTH_TOKEN)
+
     try:
         os.unlink(SOCKET_PATH)
     except FileNotFoundError:

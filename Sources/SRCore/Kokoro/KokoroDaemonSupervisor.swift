@@ -81,13 +81,12 @@ public actor KokoroDaemonSupervisor {
         lastSpawnAttempt = Date()
         token = Self.generateToken()
 
-        // Persist for other sr processes (0600, same trust domain as the
-        // socket). Written before launch so no request can race it.
+        // The token file is written by the DAEMON, after it wins its
+        // exclusive lock — never by the supervisor. Writing it here would
+        // let a losing contender overwrite the live daemon's token
+        // (GUI pre-warm racing a CLI spawn poisons every client).
         try? FileManager.default.createDirectory(at: paths.base,
                                                  withIntermediateDirectories: true)
-        try? Data(token.utf8).write(to: paths.tokenFile, options: .atomic)
-        try? FileManager.default.setAttributes(
-            [.posixPermissions: 0o600], ofItemAtPath: paths.tokenFile.path)
 
         let p = Process()
         p.executableURL = paths.venvPython

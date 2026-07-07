@@ -91,6 +91,24 @@ public actor HistoryJanitor {
         draining = false
     }
 
+    /// Await the queue emptying (deletes + retry schedule). Returns true
+    /// when everything was processed, false on timeout with work pending.
+    /// The 404-retry ladder spans ~30 s worst case — callers that must not
+    /// exit with deletions pending (the CLI) should allow at least that.
+    public func waitUntilDrained(timeout: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while (draining || !pending.isEmpty) && Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+        return pending.isEmpty && !draining
+    }
+
+    /// IDs still awaiting deletion — persisted across app quits so pending
+    /// deletes survive (IDs are opaque provider tokens, content-free).
+    public var pendingIDs: [String] {
+        pending.map(\.id)
+    }
+
     /// Human-readable status for the menu ("History: 12 deleted").
     public var statusLine: String {
         switch lastStatus {

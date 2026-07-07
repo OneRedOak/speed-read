@@ -180,10 +180,19 @@ enum HeadlessCLI {
             )
         }
 
-        // Let the history janitor drain before exiting.
-        try? await Task.sleep(for: .seconds(3))
-        let janitorStatus = await janitor.statusLine
-        print(janitorStatus)
+        // Do not exit with history deletions pending: the janitor's
+        // 404-retry ladder (2.5s + 6s + 20s) exists precisely because
+        // ElevenLabs materializes history items late. 45s covers it.
+        if deleteHistory {
+            let drained = await janitor.waitUntilDrained(timeout: 45)
+            let janitorStatus = await janitor.statusLine
+            if drained {
+                print(janitorStatus)
+            } else {
+                print("WARNING: exiting with history deletions pending — \(janitorStatus)")
+                if box.code == 0 { box.code = 4 }
+            }
+        }
         await KokoroRuntime.shared.supervisor.stop()
         return box.code
     }
