@@ -37,10 +37,14 @@ public struct SynthesisResult: Sendable {
     /// Provider-side generation identifier, when the provider retains
     /// history (feeds the history janitor, P-6). Nil for local providers.
     public let remoteHistoryItemID: String?
+    /// Exact billed credits from the provider (`character-cost` header),
+    /// feeding the cost ledger (C-1/C-2). Nil for local providers.
+    public let billedCharacters: Int?
 
-    public init(audio: Data, remoteHistoryItemID: String? = nil) {
+    public init(audio: Data, remoteHistoryItemID: String? = nil, billedCharacters: Int? = nil) {
         self.audio = audio
         self.remoteHistoryItemID = remoteHistoryItemID
+        self.billedCharacters = billedCharacters
     }
 }
 

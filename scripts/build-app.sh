@@ -23,6 +23,9 @@ for res in "$BIN_DIR"/*.bundle; do
   [ -e "$res" ] && cp -R "$res" "$BUNDLE_DIR/Contents/Resources/"
 done
 
+# Kokoro daemon script — installed into App Support by the in-app installer.
+cp daemon/sr_tts_server.py "$BUNDLE_DIR/Contents/Resources/"
+
 cat > "$BUNDLE_DIR/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

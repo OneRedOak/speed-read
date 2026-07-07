@@ -1,32 +1,94 @@
 import Foundation
 import SRCore
 
-/// Bounded-concurrency chunk synthesis (F-5).
+/// Bounded-concurrency chunk synthesis (F-5) with cache-first lookup (C-4),
+/// exact-cost + history-ID reporting, and cloud→local fallback (F-3 Auto).
 ///
-/// Synthesizes sentence chunks with at most `maxInFlight` concurrent
-/// requests, delivering results (in whatever order they complete) to the
-/// playback engine, which schedules them in order. Chunk 0 is requested
-/// first so playback starts as soon as the first sentence is ready.
+/// At most `maxInFlight` chunks synthesize concurrently; results are
+/// delivered as they complete and the playback engine schedules in order.
+/// Chunk 0 is requested first so playback starts fast.
+///
+/// Fallback (ported from speak.sh): when the primary provider fails with a
+/// fallback-trigger error (429 / 5xx / network) and a fallback provider is
+/// configured, the failed chunk is retried on the fallback and all
+/// subsequent chunks go straight there. Fallback is one-way, cloud→local —
+/// never local→cloud (that would violate P-8 routing guarantees).
 final class SynthesisPipeline: @unchecked Sendable {
     static let maxInFlight = 3
 
-    private var task: Task<Void, Never>?
+    struct Route: Sendable {
+        let provider: any TTSProvider
+        let voiceID: String
+        /// Modeled for cache keying; "" for providers without models.
+        let modelID: String
+    }
 
-    /// History item IDs collected this session (feeds P-6 janitor, Phase 2).
-    private(set) var historyItemIDs: [String] = []
-    private let historyLock = NSLock()
+    struct Callbacks: Sendable {
+        let deliver: @MainActor @Sendable (Int, Data) -> Void
+        let billed: @Sendable (Int) -> Void
+        let historyID: @Sendable (String) -> Void
+        let fellBack: @MainActor @Sendable () -> Void
+        let failed: @MainActor @Sendable (TTSError) -> Void
+    }
+
+    private var task: Task<Void, Never>?
 
     func run(
         chunks: [Chunk],
-        provider: some TTSProvider,
-        voiceID: String,
+        primary: Route,
+        fallback: Route?,
         settings: VoiceSettings,
-        deliver: @escaping @MainActor (Int, Data) -> Void,
-        failed: @escaping @MainActor (TTSError) -> Void
+        cache: AudioCache?,
+        callbacks: Callbacks
     ) {
         cancel()
         let errorFlag = OnceFlag()
-        task = Task { [weak self] in
+        let fallbackFlag = OnceFlag()
+        let useFallback = AtomicBool()
+
+        @Sendable func synthesize(_ chunk: Chunk) async throws -> Void {
+            var route = useFallback.value ? (fallback ?? primary) : primary
+
+            func cacheKey(_ r: Route) -> String {
+                AudioCache.key(text: chunk.text, provider: r.provider.id,
+                               voiceID: r.voiceID, modelID: r.modelID,
+                               settings: settings)
+            }
+
+            // Cache first (C-4): zero credits, instant.
+            if let cached = cache?.lookup(cacheKey(route)) {
+                await callbacks.deliver(chunk.id, cached)
+                return
+            }
+
+            var result: SynthesisResult
+            do {
+                result = try await route.provider.synthesize(
+                    text: chunk.text, voiceID: route.voiceID, settings: settings)
+            } catch let error as TTSError where error.isFallbackTrigger && fallback != nil && !route.provider.isLocal {
+                // Flip to fallback for this and all subsequent chunks (T-7).
+                useFallback.set(true)
+                if fallbackFlag.trip() {
+                    SRLog.event("pipeline.fallback", ["trigger": String(describing: error)])
+                    await MainActor.run { callbacks.fellBack() }
+                }
+                route = fallback!
+                if let cached = cache?.lookup(cacheKey(route)) {
+                    await callbacks.deliver(chunk.id, cached)
+                    return
+                }
+                result = try await route.provider.synthesize(
+                    text: chunk.text, voiceID: route.voiceID, settings: settings)
+            }
+
+            if let billed = result.billedCharacters { callbacks.billed(billed) }
+            if let historyID = result.remoteHistoryItemID { callbacks.historyID(historyID) }
+            cache?.store(cacheKey(route), data: result.audio)
+            guard !Task.isCancelled else { return }
+            await callbacks.deliver(chunk.id, result.audio)
+        }
+
+        task = Task {
             await withTaskGroup(of: Void.self) { group in
                 var iterator = chunks.makeIterator()
                 var active = 0
@@ -36,17 +98,11 @@ final class SynthesisPipeline: @unchecked Sendable {
                     active += 1
                     group.addTask {
                         do {
-                            let result = try await provider.synthesize(
-                                text: chunk.text, voiceID: voiceID, settings: settings)
-                            if let historyID = result.remoteHistoryItemID {
-                                self?.recordHistoryID(historyID)
-                            }
-                            guard !Task.isCancelled else { return }
-                            await deliver(chunk.id, result.audio)
+                            try await synthesize(chunk)
                         } catch let error as TTSError {
                             guard !Task.isCancelled, error != .cancelled else { return }
                             if errorFlag.trip() {
-                                await MainActor.run { failed(error) }
+                                await MainActor.run { callbacks.failed(error) }
                             }
                         } catch {
                             // Non-TTSError (URLSession cancellation etc.) — ignore.
@@ -55,11 +111,9 @@ final class SynthesisPipeline: @unchecked Sendable {
                     return true
                 }
 
-                // Prime the window.
                 for _ in 0..<Self.maxInFlight {
                     if !spawnNext() { break }
                 }
-                // Refill as requests complete.
                 while active > 0 {
                     await group.next()
                     active -= 1
@@ -73,12 +127,6 @@ final class SynthesisPipeline: @unchecked Sendable {
     func cancel() {
         task?.cancel()
         task = nil
-    }
-
-    private func recordHistoryID(_ id: String) {
-        historyLock.lock()
-        historyItemIDs.append(id)
-        historyLock.unlock()
     }
 }
 
@@ -94,6 +142,23 @@ private final class OnceFlag: @unchecked Sendable {
         if tripped { return false }
         tripped = true
         return true
+    }
+}
+
+private final class AtomicBool: @unchecked Sendable {
+    private var stored = false
+    private let lock = NSLock()
+
+    var value: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+
+    func set(_ newValue: Bool) {
+        lock.lock()
+        stored = newValue
+        lock.unlock()
     }
 }
 

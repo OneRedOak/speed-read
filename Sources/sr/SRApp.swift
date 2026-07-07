@@ -2,14 +2,26 @@ import KeyboardShortcuts
 import SRCore
 import SwiftUI
 
+final class SRAppDelegate: NSObject, NSApplicationDelegate {
+    static weak var state: AppState?
+
+    func applicationWillTerminate(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            SRAppDelegate.state?.shutdown()
+        }
+    }
+}
+
 @main
 struct SRApp: App {
+    @NSApplicationDelegateAdaptor(SRAppDelegate.self) private var appDelegate
     @StateObject private var state = AppState()
 
     var body: some Scene {
         MenuBarExtra {
             MenuView()
                 .environmentObject(state)
+                .onAppear { SRAppDelegate.state = state }
         } label: {
             Image(systemName: state.playback.isActive
                   ? "waveform.circle.fill" : "waveform")
@@ -29,17 +41,18 @@ struct MenuView: View {
             progressRow
             speedRow
             Divider()
-            voicePicker
-            modelPicker
+            backendPicker
+            voicePickers
             Divider()
+            privacySection
             statusSection
             actionsSection
         }
         .padding(12)
-        .frame(width: 300)
+        .frame(width: 320)
     }
 
-    // MARK: - Transport (F-7 subset for Phase 1)
+    // MARK: - Transport (F-7 subset)
 
     private var transportRow: some View {
         HStack(spacing: 14) {
@@ -102,28 +115,62 @@ struct MenuView: View {
         }
     }
 
-    // MARK: - Voice & model
+    // MARK: - Backend & voices (F-3, P-8 Local-Only)
 
-    private var voicePicker: some View {
-        Picker("Voice", selection: $state.voiceID) {
-            ForEach(ElevenLabsProvider.presetVoices) { voice in
-                Text(voice.name).tag(voice.id)
+    private var backendPicker: some View {
+        Picker(selection: $state.backendMode) {
+            Text("Auto (cloud → local)").tag(SettingsStore.BackendMode.auto)
+            Text("Cloud only").tag(SettingsStore.BackendMode.cloud)
+            Text("Local only 🔒").tag(SettingsStore.BackendMode.local)
+        } label: {
+            Text("Backend")
+        }
+        .pickerStyle(.segmented)
+        .help("Local only guarantees no text ever leaves this Mac")
+    }
+
+    @ViewBuilder
+    private var voicePickers: some View {
+        if state.backendMode != .local {
+            Picker("Voice", selection: $state.voiceID) {
+                ForEach(ElevenLabsProvider.presetVoices) { voice in
+                    Text(voice.name).tag(voice.id)
+                }
+                if !ElevenLabsProvider.presetVoices.contains(where: { $0.id == state.voiceID }) {
+                    Text("Custom (\(String(state.voiceID.prefix(8)))…)").tag(state.voiceID)
+                }
             }
-            if !ElevenLabsProvider.presetVoices.contains(where: { $0.id == state.voiceID }) {
-                Text("Custom (\(String(state.voiceID.prefix(8)))…)").tag(state.voiceID)
+            Picker("Model", selection: $state.modelID) {
+                ForEach(ElevenLabsProvider.models, id: \.id) { model in
+                    Text(model.name).tag(model.id)
+                }
+            }
+        }
+        if state.kokoroInstalled && state.backendMode != .cloud {
+            Picker("Local voice", selection: $state.localVoiceID) {
+                ForEach(KokoroProvider.presetVoices) { voice in
+                    Text(voice.name).tag(voice.id)
+                }
             }
         }
     }
 
-    private var modelPicker: some View {
-        Picker("Model", selection: $state.modelID) {
-            ForEach(ElevenLabsProvider.models, id: \.id) { model in
-                Text(model.name).tag(model.id)
+    // MARK: - Privacy & cost (P-6, P-10, C-1/C-2)
+
+    private var privacySection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle("Auto-delete ElevenLabs history", isOn: $state.autoDeleteHistory)
+                .toggleStyle(.checkbox)
+                .help("Best-effort: deletes each generation from your account right after synthesis")
+            Toggle("Cache audio (disable for sensitive sessions)", isOn: $state.cacheEnabled)
+                .toggleStyle(.checkbox)
+            if !state.historyStatus.isEmpty {
+                Text(state.historyStatus)
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
+        .font(.callout)
     }
-
-    // MARK: - Status & actions
 
     @ViewBuilder
     private var statusSection: some View {
@@ -139,10 +186,22 @@ struct MenuView: View {
         if let message = state.statusMessage {
             Text(message).font(.caption).foregroundStyle(.orange)
         }
-        if let remaining = state.creditsRemaining, let limit = state.creditsLimit {
-            Text("Credits: \(remaining.formatted()) / \(limit.formatted())")
-                .font(.caption).foregroundStyle(.secondary)
+        if let installStatus = state.kokoroInstallStatus {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text(installStatus).font(.caption).foregroundStyle(.secondary)
+            }
         }
+        HStack {
+            if let remaining = state.creditsRemaining, let limit = state.creditsLimit {
+                Text("Credits: \(remaining.formatted()) / \(limit.formatted())")
+            }
+            let spent = state.ledger.spentToday
+            if spent > 0 {
+                Text("· today: \(spent.formatted())")
+            }
+        }
+        .font(.caption).foregroundStyle(.secondary)
     }
 
     private var actionsSection: some View {
@@ -172,6 +231,18 @@ struct MenuView: View {
                 }
                 .buttonStyle(.borderless)
             }
+
+            if !state.kokoroInstalled && state.kokoroInstallStatus == nil {
+                Button("Install Local Voice (Kokoro, ~330 MB)…") {
+                    state.installKokoro()
+                }
+                .buttonStyle(.borderless)
+            }
+
+            Button("Purge Audio Cache") {
+                state.purgeCache()
+            }
+            .buttonStyle(.borderless)
 
             HStack {
                 KeyboardShortcuts.Recorder("Speak/Stop:", name: .speakOrStop)

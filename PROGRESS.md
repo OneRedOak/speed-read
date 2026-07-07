@@ -42,7 +42,8 @@ PRD: see conversation / repo root. Reference implementation cloned at `reference
 - [x] Phase 0 spike B — live verification complete: header present, delete works, history empty after delete. Note: current key is on the free tier (10k chars/mo) and was exposed in the setup conversation — rotate before real use.
 - [x] Phase 1 code — F-1, F-2, F-3 (ElevenLabs only), F-4 (30/30 parity fixtures), F-5, F-6 minimal, F-8, P-1, P-2, P-3, P-4 (refusal in capture path), P-5, P-11. `dist/sr.app` builds + launches.
 - [ ] Phase 1 acceptance — end-to-end speak blocked on: user grants Accessibility to sr.app; user adds ElevenLabs key to Keychain. Then: T-1 capture matrix spot-check, T-2 clipboard integrity, live spike B (history-item-id header).
-- [ ] Phase 2 — privacy hardening + Kokoro + cache
+- [x] Phase 2 code — P-6 HistoryJanitor (on by default; leftover Phase-1 history manually purged, account history verified empty), P-8 routing rules (`rules.json`, password managers blocked) + Local-Only backend mode, P-9 Kokoro daemon (Unix socket + per-launch token), P-10 cache (SHA-256 keys, 500 MB LRU, 30-day TTL, purge + no-cache toggle), P-12 pins (mlx-audio==0.4.4, model rev a71e4d38…, weights SHA-256 recorded), F-3 Kokoro provider + Auto cloud→local fallback (one-way, never local→cloud), F-9 cache-first, C-1 credits + spent-today (exact `character-cost` header), C-2 daily budget 30k w/ 80% warn + hard stop + override, C-3 large-read confirm ≥8k chars. 30 tests green.
+- [ ] Phase 2 acceptance — pending: user-initiated Kokoro install (~330 MB, "Install Local Voice" in menu) then T-7 fallback test; T-6 log sweep passed structurally on real Phase-1 session logs (content-free confirmed); T-3 concealed-refusal live test needs a password manager copy.
 - [ ] Phase 3 — transport polish, sign/notarize, v1.0
 - [ ] Phase 4 — automations (CLI → Shortcuts → MCP → scheme)
 

@@ -123,14 +123,16 @@ public struct ElevenLabsProvider: TTSProvider {
         }
 
         let historyID = http.value(forHTTPHeaderField: "history-item-id")
+        let billed = http.value(forHTTPHeaderField: "character-cost").flatMap(Int.init)
         SRLog.event("elevenlabs.ok", [
             "chars": String(text.count),
+            "billed": String(billed ?? -1),
             "bytes": String(data.count),
             "latency_ms": String(latencyMS),
             "model": modelID,
             "history_id_present": historyID == nil ? "0" : "1",
         ])
-        return SynthesisResult(audio: data, remoteHistoryItemID: historyID)
+        return SynthesisResult(audio: data, remoteHistoryItemID: historyID, billedCharacters: billed)
     }
 
     // MARK: - Account info (C-1)

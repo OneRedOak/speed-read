@@ -1,0 +1,283 @@
+import Foundation
+
+/// Shared runtime for the local stack: one supervisor + installer pair.
+public final class KokoroRuntime: Sendable {
+    public static let shared = KokoroRuntime()
+
+    public let paths: KokoroPaths
+    public let supervisor: KokoroDaemonSupervisor
+    public let installer: KokoroInstaller
+
+    public init(paths: KokoroPaths = .standard) {
+        self.paths = paths
+        self.supervisor = KokoroDaemonSupervisor(paths: paths)
+        self.installer = KokoroInstaller(paths: paths)
+    }
+
+    public var isInstalled: Bool { installer.isInstalled }
+}
+
+/// Local Kokoro provider (F-3). Text never leaves the machine (P-9).
+///
+/// Error mapping (feeds Auto-mode logic):
+///   - not installed / daemon unreachable / protocol failure
+///       → .network("kokoro: …")   (transport-level, content-free)
+///   - daemon replied {"status":"error"}
+///       → .http(status: 500, body: message)   (generation-level)
+/// Both are `isFallbackTrigger == true`, which is harmless here: Auto mode
+/// falls back cloud→local, never local→cloud (falling "back" to the cloud
+/// would silently violate a local-only routing decision, P-8).
+public struct KokoroProvider: TTSProvider {
+    public let id = "kokoro"
+    public let isLocal = true
+
+    /// Curated English subset (from the reference; full list in the model's
+    /// VOICES.md). First letter encodes language: a=US, b=British.
+    public static let presetVoices: [Voice] = [
+        Voice(id: "bf_lily", name: "Lily — British, bright"),
+        Voice(id: "af_heart", name: "Heart — warm"),
+        Voice(id: "af_bella", name: "Bella — soft"),
+        Voice(id: "af_nova", name: "Nova — confident"),
+        Voice(id: "af_sarah", name: "Sarah — gentle"),
+        Voice(id: "af_sky", name: "Sky — bright"),
+        Voice(id: "am_adam", name: "Adam — deep"),
+        Voice(id: "am_echo", name: "Echo — clear"),
+        Voice(id: "am_eric", name: "Eric — steady"),
+        Voice(id: "am_michael", name: "Michael — warm"),
+        Voice(id: "bf_emma", name: "Emma — British, warm"),
+        Voice(id: "bm_george", name: "George — British, deep"),
+    ]
+
+    private let runtime: KokoroRuntime
+
+    public init(runtime: KokoroRuntime = .shared) {
+        self.runtime = runtime
+    }
+
+    public func voices() async throws -> [Voice] { Self.presetVoices }
+
+    public func synthesize(text: String, voiceID: String, settings: VoiceSettings) async throws -> SynthesisResult {
+        do {
+            try await runtime.supervisor.ensureRunning()
+        } catch let error as KokoroDaemonSupervisor.SupervisorError {
+            if case .notInstalled = error {
+                throw TTSError.network(underlying: "kokoro: local TTS not installed")
+            }
+            SRLog.error("kokoro.daemon", ["error": String(describing: error)])
+            throw TTSError.network(underlying: "kokoro: daemon unavailable")
+        }
+
+        let token = await runtime.supervisor.token
+        let started = Date()
+
+        // Daemon protocol: one JSON request line, one JSON response line.
+        // Speed is always 1.0 — sr applies rate client-side (F-8).
+        let request = KokoroRequest(
+            token: token,
+            text: text,
+            voice: voiceID,
+            speed: "1.0",
+            lang_code: String(voiceID.prefix(1))
+        )
+        let requestLine = try KokoroWire.encode(request)
+
+        let responseLine: String
+        do {
+            responseLine = try await UnixSocketLineClient.roundTrip(
+                socketPath: runtime.paths.socketPath,
+                line: requestLine,
+                timeout: 120
+            )
+        } catch is CancellationError {
+            throw TTSError.cancelled
+        } catch {
+            SRLog.error("kokoro.socket", ["error": String(describing: type(of: error))])
+            throw TTSError.network(underlying: "kokoro: socket I/O failed")
+        }
+
+        let response = try KokoroWire.decodeResponse(responseLine)
+        switch response {
+        case .error(let message):
+            throw TTSError.http(status: 500, body: message)
+        case .ok(let audioFilePath):
+            let url = URL(fileURLWithPath: audioFilePath)
+            defer {
+                // Client owns the temp dir (see daemon protocol doc).
+                try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+            }
+            guard let audio = try? Data(contentsOf: url), !audio.isEmpty else {
+                throw TTSError.http(status: 500, body: "kokoro: empty audio file")
+            }
+            SRLog.event("kokoro.ok", [
+                "chars": String(text.count),
+                "bytes": String(audio.count),
+                "latency_ms": String(Int(Date().timeIntervalSince(started) * 1000)),
+            ])
+            return SynthesisResult(audio: audio)  // no history ID, no billing
+        }
+    }
+}
+
+// MARK: - Wire format
+
+struct KokoroRequest: Codable {
+    let token: String
+    let text: String
+    let voice: String
+    let speed: String
+    let lang_code: String
+}
+
+enum KokoroWire {
+    enum Response: Equatable {
+        case ok(audioFile: String)
+        case error(message: String)
+    }
+
+    struct WireError: Error {
+        let message: String
+    }
+
+    static func encode(_ request: KokoroRequest) throws -> String {
+        let data = try JSONEncoder().encode(request)
+        guard let line = String(data: data, encoding: .utf8) else {
+            throw WireError(message: "request encoding failed")
+        }
+        return line
+    }
+
+    static func decodeResponse(_ line: String) throws -> Response {
+        struct Raw: Codable {
+            let status: String
+            let audio_file: String?
+            let message: String?
+        }
+        let raw = try JSONDecoder().decode(Raw.self, from: Data(line.utf8))
+        if raw.status == "ok", let file = raw.audio_file {
+            return .ok(audioFile: file)
+        }
+        return .error(message: raw.message ?? "unknown daemon error")
+    }
+}
+
+// MARK: - Unix socket client
+
+/// Minimal blocking-I/O Unix socket client run on a utility queue, with
+/// cancellation support (task cancellation closes the fd, unblocking I/O).
+enum UnixSocketLineClient {
+    struct SocketError: Error {
+        let message: String
+    }
+
+    static func roundTrip(socketPath: String, line: String, timeout: TimeInterval) async throws -> String {
+        let fdBox = FDBox()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { cont in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do {
+                        cont.resume(returning: try roundTripBlocking(
+                            socketPath: socketPath, line: line,
+                            timeout: timeout, fdBox: fdBox))
+                    } catch {
+                        cont.resume(throwing: error)
+                    }
+                }
+            }
+        } onCancel: {
+            fdBox.closeNow()
+        }
+    }
+
+    /// Thread-safe holder so cancellation can close the fd from any thread.
+    final class FDBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var fd: Int32 = -1
+        private var closed = false
+
+        /// Returns false if already cancelled (fd should not be used).
+        func set(_ newFD: Int32) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            if closed { return false }
+            fd = newFD
+            return true
+        }
+
+        func closeNow() {
+            lock.lock()
+            defer { lock.unlock() }
+            closed = true
+            if fd >= 0 {
+                close(fd)
+                fd = -1
+            }
+        }
+
+        func closeIfOpen() {
+            closeNow()
+        }
+    }
+
+    private static func roundTripBlocking(
+        socketPath: String, line: String, timeout: TimeInterval, fdBox: FDBox
+    ) throws -> String {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw SocketError(message: "socket() failed") }
+        guard fdBox.set(fd) else {
+            close(fd)
+            throw CancellationError()
+        }
+        defer { fdBox.closeIfOpen() }
+
+        // I/O timeouts so a hung daemon can't wedge us past `timeout`.
+        var tv = timeval(tv_sec: Int(timeout), tv_usec: 0)
+        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        _ = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let fits = withUnsafeMutableBytes(of: &addr.sun_path) { raw -> Bool in
+            let bytes = Array(socketPath.utf8)
+            guard bytes.count < raw.count else { return false }
+            raw.copyBytes(from: bytes)
+            return true
+        }
+        guard fits else { throw SocketError(message: "socket path too long") }
+
+        let connected = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard connected == 0 else { throw SocketError(message: "connect failed") }
+
+        let payload = Array((line + "\n").utf8)
+        var sent = 0
+        while sent < payload.count {
+            let n = payload.withUnsafeBytes { raw in
+                write(fd, raw.baseAddress!.advanced(by: sent), payload.count - sent)
+            }
+            guard n > 0 else { throw SocketError(message: "write failed") }
+            sent += n
+        }
+
+        var received = Data()
+        var buffer = [UInt8](repeating: 0, count: 65536)
+        while !received.contains(0x0A) {
+            let n = read(fd, &buffer, buffer.count)
+            if n < 0 { throw SocketError(message: "read failed or timed out") }
+            if n == 0 { break }  // daemon closed
+            received.append(contentsOf: buffer[0..<n])
+            if received.count > 1 << 20 {
+                throw SocketError(message: "oversized response")
+            }
+        }
+        guard let newline = received.firstIndex(of: 0x0A) else {
+            throw SocketError(message: "connection closed before response")
+        }
+        guard let response = String(data: received[..<newline], encoding: .utf8) else {
+            throw SocketError(message: "non-UTF8 response")
+        }
+        return response
+    }
+}

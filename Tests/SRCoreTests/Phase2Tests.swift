@@ -1,0 +1,122 @@
+import Foundation
+import Testing
+@testable import SRCore
+
+@Suite struct RoutingPolicyTests {
+    @Test func exactMatchWins() {
+        var policy = RoutingPolicy(rules: ["com.apple.mail": .forceLocal])
+        #expect(policy.action(for: "com.apple.mail") == .forceLocal)
+        #expect(policy.action(for: "com.apple.notes") == .default)
+        policy = RoutingPolicy(rules: [:])
+        #expect(policy.action(for: "com.apple.mail") == .default)
+    }
+
+    @Test func wildcardPrefix() {
+        let policy = RoutingPolicy(rules: ["com.1password.*": .block])
+        #expect(policy.action(for: "com.1password.1password") == .block)
+        #expect(policy.action(for: "com.1password.op-helper") == .block)
+        #expect(policy.action(for: "com.1passwordish.other") == .default)
+    }
+
+    @Test func exactBeatsWildcard() {
+        let policy = RoutingPolicy(rules: [
+            "com.example.*": .block,
+            "com.example.safe": .default,
+        ])
+        #expect(policy.action(for: "com.example.safe") == .default)
+        #expect(policy.action(for: "com.example.danger") == .block)
+    }
+
+    @Test func shippedDefaultsBlockPasswordManagers() {
+        let policy = RoutingPolicy(rules: RoutingPolicy.shippedDefaults)
+        #expect(policy.action(for: "com.1password.1password8") == .block)
+        #expect(policy.action(for: "com.apple.keychainaccess") == .block)
+        #expect(policy.action(for: "com.apple.Safari") == .default)
+        #expect(policy.action(for: nil) == .default)
+    }
+}
+
+@Suite struct CostLedgerTests {
+    private func freshLedger() -> CostLedger {
+        let defaults = UserDefaults(suiteName: "sr-tests-\(UUID().uuidString)")!
+        return CostLedger(defaults: defaults)
+    }
+
+    @Test func recordsAndAccumulates() {
+        let ledger = freshLedger()
+        #expect(ledger.spentToday == 0)
+        ledger.record(billedCharacters: 100)
+        ledger.record(billedCharacters: 50)
+        #expect(ledger.spentToday == 150)
+    }
+
+    @Test func verdictThresholds() {
+        let ledger = freshLedger()
+        ledger.dailyBudget = 1000
+        #expect(ledger.verdict() == .ok)
+        ledger.record(billedCharacters: 799)
+        #expect(ledger.verdict() == .ok)
+        ledger.record(billedCharacters: 1)   // 800 = 80%
+        #expect(ledger.verdict() == .warning(spent: 800, budget: 1000))
+        ledger.record(billedCharacters: 200) // 1000 = 100%
+        #expect(ledger.verdict() == .exceeded(spent: 1000, budget: 1000))
+    }
+
+    @Test func overrideSuspendsEnforcement() {
+        let ledger = freshLedger()
+        ledger.dailyBudget = 10
+        ledger.record(billedCharacters: 50)
+        #expect(ledger.verdict() == .exceeded(spent: 50, budget: 10))
+        ledger.overriddenToday = true
+        #expect(ledger.verdict() == .ok)
+    }
+}
+
+@Suite struct AudioCacheTests {
+    private func freshCache() -> AudioCache {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sr-cache-test-\(UUID().uuidString)")
+        return AudioCache(directory: dir, sizeCapBytes: 1000, ttl: 3600)
+    }
+
+    @Test func keyIsStableAndCollisionResistant() {
+        let a = AudioCache.key(text: "hello", provider: "elevenlabs",
+                               voiceID: "v1", modelID: "m1", settings: VoiceSettings())
+        let b = AudioCache.key(text: "hello", provider: "elevenlabs",
+                               voiceID: "v1", modelID: "m1", settings: VoiceSettings())
+        let c = AudioCache.key(text: "hello", provider: "elevenlabs",
+                               voiceID: "v2", modelID: "m1", settings: VoiceSettings())
+        // Field-boundary collision: text "x·v" vs voice must not collide.
+        let d = AudioCache.key(text: "hellov1", provider: "elevenlabs",
+                               voiceID: "", modelID: "m1", settings: VoiceSettings())
+        #expect(a == b)
+        #expect(a != c)
+        #expect(a != d)
+        #expect(a.count == 64)
+    }
+
+    @Test func roundTripAndPurge() async throws {
+        let cache = freshCache()
+        let key = AudioCache.key(text: "t", provider: "p", voiceID: "v",
+                                 modelID: "m", settings: VoiceSettings())
+        #expect(cache.lookup(key) == nil)
+        cache.store(key, data: Data([1, 2, 3]))
+        // store is async on a utility queue — give it a beat.
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(cache.lookup(key) == Data([1, 2, 3]))
+        cache.purge()
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(cache.lookup(key) == nil)
+    }
+
+    @Test func disabledCacheStoresNothing() async throws {
+        let cache = freshCache()
+        cache.enabled = false
+        let key = AudioCache.key(text: "t2", provider: "p", voiceID: "v",
+                                 modelID: "m", settings: VoiceSettings())
+        cache.store(key, data: Data([9]))
+        try await Task.sleep(for: .milliseconds(200))
+        cache.enabled = true
+        #expect(cache.lookup(key) == nil)
+    }
+}

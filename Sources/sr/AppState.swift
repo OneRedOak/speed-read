@@ -14,18 +14,24 @@ extension KeyboardShortcuts.Name {
         default: .init(.period, modifiers: [.option, .shift]))
 }
 
-/// Central controller: hotkeys → capture → normalize → chunk → synthesize
-/// → play. Owns all mutable app state; the SwiftUI menu observes it.
+/// Central controller: hotkeys → routing → capture → normalize → chunk →
+/// synthesize (cache-first, budgeted) → play. Owns all mutable app state.
 @MainActor
 final class AppState: ObservableObject {
     let settings = SettingsStore()
     let playback: PlaybackEngine
+    let ledger = CostLedger()
     private let pipeline = SynthesisPipeline()
+    private let janitor = HistoryJanitor()
+    private var routing = RoutingPolicy.load()
 
     @Published var statusMessage: String?
     @Published var lastError: String?
     @Published var creditsRemaining: Int?
     @Published var creditsLimit: Int?
+    @Published var historyStatus: String = ""
+    @Published var kokoroInstallStatus: String?
+    @Published var kokoroInstalled = KokoroRuntime.shared.isInstalled
     @Published private(set) var accessibilityGranted = AXIsProcessTrusted()
 
     @Published var playbackRate: Double {
@@ -37,8 +43,24 @@ final class AppState: ObservableObject {
     @Published var voiceID: String {
         didSet { settings.voiceID = voiceID }
     }
+    @Published var localVoiceID: String {
+        didSet { settings.localVoiceID = localVoiceID }
+    }
     @Published var modelID: String {
         didSet { settings.modelID = modelID }
+    }
+    /// Backend mode; `.local` is the Local-Only master switch (P-8).
+    @Published var backendMode: SettingsStore.BackendMode {
+        didSet { settings.backendMode = backendMode }
+    }
+    @Published var autoDeleteHistory: Bool {
+        didSet { settings.autoDeleteHistory = autoDeleteHistory }
+    }
+    @Published var cacheEnabled: Bool {
+        didSet {
+            settings.cacheEnabled = cacheEnabled
+            AudioCache.shared.enabled = cacheEnabled
+        }
     }
 
     private var statusClearTask: Task<Void, Never>?
@@ -50,7 +72,12 @@ final class AppState: ObservableObject {
                                   sentencePauseMS: store.sentencePauseMS)
         playbackRate = store.playbackRate
         voiceID = store.voiceID
+        localVoiceID = store.localVoiceID
         modelID = store.modelID
+        backendMode = store.backendMode
+        autoDeleteHistory = store.autoDeleteHistory
+        cacheEnabled = store.cacheEnabled
+        AudioCache.shared.enabled = store.cacheEnabled
 
         KeyboardShortcuts.onKeyDown(for: .speakOrStop) { [weak self] in
             Task { @MainActor in self?.speakOrStop() }
@@ -59,7 +86,6 @@ final class AppState: ObservableObject {
             Task { @MainActor in self?.playback.togglePauseResume() }
         }
 
-        // Surface nested PlaybackEngine changes to views observing AppState.
         playback.objectWillChange
             .sink { [weak self] in self?.objectWillChange.send() }
             .store(in: &cancellables)
@@ -68,6 +94,18 @@ final class AppState: ObservableObject {
             promptForAccessibility()
         }
         refreshCredits()
+
+        // Startup cache maintenance (TTL sweep + LRU).
+        Task.detached(priority: .utility) {
+            AudioCache.shared.evictIfNeeded()
+        }
+    }
+
+    func shutdown() {
+        stop()
+        Task { await KokoroRuntime.shared.supervisor.stop() }
+        // Give the SIGTERM a moment; the daemon's parent watchdog is the backstop.
+        usleep(200_000)
     }
 
     // MARK: - Primary flows
@@ -77,18 +115,27 @@ final class AppState: ObservableObject {
             stop()
             return
         }
+        // Routing is decided on the app that is frontmost at hotkey time (P-8).
+        let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let action = routing.action(for: bundleID)
+        if action == .block {
+            NSSound.beep()
+            flashStatus("Speaking blocked for this app")
+            SRLog.event("routing.blocked", [:])
+            return
+        }
         // Capture must run off the main thread: the ⌘C fallback sleeps
         // while polling the pasteboard. Strong capture is fine — AppState
         // lives for the app's lifetime and the task is short.
         Task.detached { [self] in
             let result = SelectionCapture.capture()
-            await MainActor.run { handleCapture(result) }
+            await MainActor.run { handleCapture(result, routingAction: action) }
         }
     }
 
     func speakClipboard() {
         if playback.isActive { stop() }
-        handleCapture(SelectionCapture.clipboardText())
+        handleCapture(SelectionCapture.clipboardText(), routingAction: .default)
     }
 
     func stop() {
@@ -96,7 +143,8 @@ final class AppState: ObservableObject {
         playback.stop()
     }
 
-    private func handleCapture(_ result: SelectionCapture.CaptureResult) {
+    private func handleCapture(_ result: SelectionCapture.CaptureResult,
+                               routingAction: RoutingPolicy.Action) {
         switch result {
         case .accessibilityDenied:
             accessibilityGranted = false
@@ -108,21 +156,90 @@ final class AppState: ObservableObject {
             NSSound.beep()
             flashStatus("No selection found")
         case .text(let raw, let method):
-            speak(raw, captureMethod: method)
+            speak(raw, captureMethod: method, routingAction: routingAction)
         }
     }
 
-    private func speak(_ raw: String, captureMethod: SelectionCapture.Method) {
+    /// Resolve primary/fallback providers from backend mode + routing (F-3, P-8).
+    private func resolveRoutes(routingAction: RoutingPolicy.Action)
+        -> (primary: SynthesisPipeline.Route, fallback: SynthesisPipeline.Route?, isLocal: Bool)? {
+        let wantsLocal = backendMode == .local || routingAction == .forceLocal
+        let kokoroReady = KokoroRuntime.shared.isInstalled
+
+        let localRoute = SynthesisPipeline.Route(
+            provider: KokoroProvider(), voiceID: localVoiceID, modelID: "kokoro-82M")
+        let cloudRoute = SynthesisPipeline.Route(
+            provider: ElevenLabsProvider(modelID: modelID), voiceID: voiceID, modelID: modelID)
+
+        if wantsLocal {
+            guard kokoroReady else {
+                lastError = "Local voice not installed — use \"Install Local Voice\" in the menu."
+                flashStatus(lastError!)
+                return nil
+            }
+            return (localRoute, nil, true)
+        }
+        switch backendMode {
+        case .cloud:
+            return (cloudRoute, nil, false)
+        case .auto, .local:
+            // Auto: cloud primary, local fallback when available. No API key →
+            // go straight local if we can (ported from speak.sh).
+            if KeychainStore.readAPIKey() == nil && kokoroReady {
+                return (localRoute, nil, true)
+            }
+            return (cloudRoute, kokoroReady ? localRoute : nil, false)
+        }
+    }
+
+    private func speak(_ raw: String,
+                       captureMethod: SelectionCapture.Method,
+                       routingAction: RoutingPolicy.Action) {
         let normalized = Normalizer.normalize(raw)
         let chunks = Chunker.split(normalized)
         guard !chunks.isEmpty else {
             flashStatus("Nothing to speak")
             return
         }
+        guard var routes = resolveRoutes(routingAction: routingAction) else { return }
+
+        // Budget gate (C-2) — cloud reads only.
+        if !routes.isLocal {
+            switch ledger.verdict() {
+            case .exceeded(let spent, let budget):
+                if let localChoice = budgetExceededDialog(spent: spent, budget: budget) {
+                    if localChoice {
+                        guard let local = resolveLocalOnlyRoute() else { return }
+                        routes = (local, nil, true)
+                    } // else: override chosen, continue on cloud
+                } else {
+                    return
+                }
+            case .warning(let spent, let budget):
+                flashStatus("Budget: \(spent.formatted()) of \(budget.formatted()) today")
+            case .ok:
+                break
+            }
+        }
+
+        // Large-read confirmation (C-3) — cloud reads only.
+        if !routes.isLocal && normalized.count >= ledger.largeReadThreshold {
+            switch largeReadDialog(characters: normalized.count) {
+            case .cancel:
+                return
+            case .speakLocally:
+                guard let local = resolveLocalOnlyRoute() else { return }
+                routes = (local, nil, true)
+            case .speakCloud:
+                break
+            }
+        }
+
         SRLog.event("speak.start", [
             "capture": captureMethod.rawValue,
             "chars": String(normalized.count),
             "sentences": String(chunks.count),
+            "backend": routes.isLocal ? "local" : "cloud",
         ])
 
         playback.startSession(totalSentences: chunks.count)
@@ -130,20 +247,149 @@ final class AppState: ObservableObject {
             self?.refreshCredits()
         }
 
-        let provider = ElevenLabsProvider(modelID: modelID)
+        let deleteHistory = autoDeleteHistory
+        let janitor = janitor
+        let ledger = ledger
         pipeline.run(
             chunks: chunks,
-            provider: provider,
-            voiceID: voiceID,
+            primary: routes.primary,
+            fallback: routes.fallback,
             settings: settings.voiceSettings,
-            deliver: { [weak self] index, audio in
-                self?.playback.feed(index: index, audio: audio)
-            },
-            failed: { [weak self] error in
-                self?.handleSynthesisError(error)
-            }
+            cache: cacheEnabled ? AudioCache.shared : nil,
+            callbacks: .init(
+                deliver: { [weak self] index, audio in
+                    self?.playback.feed(index: index, audio: audio)
+                },
+                billed: { billed in
+                    ledger.record(billedCharacters: billed)
+                },
+                historyID: { [self] id in
+                    guard deleteHistory else { return }
+                    Task {
+                        await janitor.enqueue(id)
+                        let line = await janitor.statusLine
+                        await MainActor.run { historyStatus = line }
+                    }
+                },
+                fellBack: { [weak self] in
+                    self?.flashStatus("Cloud unavailable — using local voice")
+                },
+                failed: { [weak self] error in
+                    self?.handleSynthesisError(error)
+                }
+            )
         )
     }
+
+    private func resolveLocalOnlyRoute() -> SynthesisPipeline.Route? {
+        guard KokoroRuntime.shared.isInstalled else {
+            lastError = "Local voice not installed — use \"Install Local Voice\" in the menu."
+            flashStatus(lastError!)
+            return nil
+        }
+        return SynthesisPipeline.Route(
+            provider: KokoroProvider(), voiceID: localVoiceID, modelID: "kokoro-82M")
+    }
+
+    // MARK: - Dialogs (C-2 / C-3)
+
+    /// Returns nil = cancel; false = override budget (speak cloud); true = speak locally.
+    private func budgetExceededDialog(spent: Int, budget: Int) -> Bool? {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Daily budget reached"
+        alert.informativeText =
+            "You've spent \(spent.formatted()) of your \(budget.formatted())-character daily budget."
+        alert.addButton(withTitle: KokoroRuntime.shared.isInstalled
+            ? "Speak Locally (free)" : "Cancel")
+        alert.addButton(withTitle: "Override for Today")
+        if KokoroRuntime.shared.isInstalled {
+            alert.addButton(withTitle: "Cancel")
+        }
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            return KokoroRuntime.shared.isInstalled ? true : nil
+        case .alertSecondButtonReturn:
+            ledger.overriddenToday = true
+            return false
+        default:
+            return nil
+        }
+    }
+
+    private enum LargeReadChoice { case speakCloud, speakLocally, cancel }
+
+    private func largeReadDialog(characters: Int) -> LargeReadChoice {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Large selection"
+        alert.informativeText =
+            "≈\(characters.formatted()) characters — roughly \((characters / 2).formatted())–\(characters.formatted()) credits depending on model."
+        alert.addButton(withTitle: "Speak with ElevenLabs")
+        if KokoroRuntime.shared.isInstalled {
+            alert.addButton(withTitle: "Speak Locally (free)")
+        }
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            return .speakCloud
+        case .alertSecondButtonReturn where KokoroRuntime.shared.isInstalled:
+            return .speakLocally
+        default:
+            return .cancel
+        }
+    }
+
+    // MARK: - Kokoro install (P-12)
+
+    func installKokoro() {
+        guard kokoroInstallStatus == nil else { return }
+        guard let source = daemonScriptSource() else {
+            lastError = "Daemon script not found in app bundle."
+            flashStatus(lastError!)
+            return
+        }
+        kokoroInstallStatus = "Starting…"
+        // Strong capture: install must outlive any UI churn, and AppState
+        // lives for the app's lifetime.
+        Task { [self] in
+            for await progress in KokoroRuntime.shared.installer.install(daemonSourceURL: source) {
+                switch progress {
+                case .creatingVenv: kokoroInstallStatus = "Creating Python environment…"
+                case .installingPackages: kokoroInstallStatus = "Installing mlx-audio…"
+                case .downloadingModel: kokoroInstallStatus = "Downloading Kokoro model (~330 MB)…"
+                case .verifying: kokoroInstallStatus = "Verifying checksums…"
+                case .done:
+                    kokoroInstallStatus = nil
+                    kokoroInstalled = true
+                    flashStatus("Local voice installed")
+                case .failed(let message):
+                    kokoroInstallStatus = nil
+                    lastError = "Local install failed: \(message)"
+                    flashStatus(lastError ?? "Install failed")
+                }
+            }
+        }
+    }
+
+    private func daemonScriptSource() -> URL? {
+        if let bundled = Bundle.main.url(forResource: "sr_tts_server", withExtension: "py") {
+            return bundled
+        }
+        // Dev fallback: running from the repo via `swift run`.
+        let dev = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("daemon/sr_tts_server.py")
+        return FileManager.default.fileExists(atPath: dev.path) ? dev : nil
+    }
+
+    // MARK: - Cache actions (P-10)
+
+    func purgeCache() {
+        AudioCache.shared.purge()
+        flashStatus("Cache purged")
+    }
+
+    // MARK: - Error surface (F-11 minimal)
 
     private func handleSynthesisError(_ error: TTSError) {
         stop()
@@ -156,7 +402,9 @@ final class AppState: ObservableObject {
         case .http(429, _):
             lastError = "ElevenLabs quota exceeded."
         case .http(let status, _):
-            lastError = "ElevenLabs error (HTTP \(status))."
+            lastError = "Synthesis error (HTTP \(status))."
+        case .network(let detail) where detail.hasPrefix("kokoro"):
+            lastError = "Local voice unavailable."
         case .network:
             lastError = "Could not reach ElevenLabs."
         case .cancelled:
