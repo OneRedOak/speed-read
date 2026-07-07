@@ -61,6 +61,16 @@ final class RecorderView: NSView {
         return super.resignFirstResponder()
     }
 
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        // Failsafe: closing Settings mid-recording tears the view down
+        // without a resignFirstResponder — without this, every global
+        // hotkey stays disabled until relaunch.
+        if newWindow == nil && isRecording {
+            isRecording = false
+        }
+    }
+
     override func keyDown(with event: NSEvent) {
         guard isRecording else {
             super.keyDown(with: event)

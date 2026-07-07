@@ -18,25 +18,54 @@ enum HeadlessCLI {
         case installKokoro
         case speak(source: String, forceLocal: Bool)
         case speakClipboard(forceLocal: Bool)
+        case usage(error: String?)   // --help, or unrecognized/malformed args
 
+        /// nil = no arguments at all → launch the GUI. Anything else is a CLI
+        /// invocation: unrecognized flags become a usage error rather than
+        /// silently launching the menu-bar app.
         init?(arguments: [String]) {
             let args = Array(arguments.dropFirst())
             guard !args.isEmpty else { return nil }
             let forceLocal = args.contains("--local")
-            if args.contains("--install-kokoro") {
+            if args.contains("--help") || args.contains("-h") {
+                self = .usage(error: nil)
+            } else if args.contains("--install-kokoro") {
                 self = .installKokoro
-            } else if let i = args.firstIndex(of: "--speak"), i + 1 < args.count {
+            } else if let i = args.firstIndex(of: "--speak") {
+                // "-" is stdin; anything else starting with "-" is a flag the
+                // user forgot the operand before (sr --speak --local).
+                guard i + 1 < args.count,
+                      args[i + 1] == "-" || !args[i + 1].hasPrefix("-") else {
+                    self = .usage(error: "--speak requires a file path or - for stdin")
+                    return
+                }
                 self = .speak(source: args[i + 1], forceLocal: forceLocal)
             } else if args.contains("--speak-clipboard") {
                 self = .speakClipboard(forceLocal: forceLocal)
             } else {
-                return nil
+                self = .usage(error: "unrecognized arguments: \(args.joined(separator: " "))")
             }
         }
     }
 
+    private static let usageText = """
+    usage: sr [--speak <file|-> | --speak-clipboard | --install-kokoro] [--local]
+      --speak <file|->    speak a file (or stdin) through the full pipeline
+      --speak-clipboard   speak the clipboard (exit 2 on concealed content)
+      --install-kokoro    install the local voice
+      --local             force the local (Kokoro) route
+    Run with no arguments to launch the menu-bar app.
+    """
+
     static func run(_ mode: Mode) async -> Int32 {
         switch mode {
+        case .usage(let error):
+            if let error {
+                FileHandle.standardError.write(Data("sr: \(error)\n\(usageText)\n".utf8))
+                return 64  // EX_USAGE
+            }
+            print(usageText)
+            return 0
         case .installKokoro:
             return await installKokoro()
         case .speak(let source, let forceLocal):
@@ -108,6 +137,10 @@ enum HeadlessCLI {
     // MARK: - Speak
 
     private static func speak(_ text: String, forceLocal: Bool) async -> Int32 {
+        // Same daemon-script freshness guarantee as the GUI (AppState.init).
+        if KokoroRuntime.shared.isInstalled, let source = daemonScriptSource() {
+            KokoroRuntime.shared.installer.syncDaemonScript(from: source)
+        }
         let settings = SettingsStore()
         let normalized = Normalizer.normalize(text)
         let chunks = Chunker.split(normalized)
@@ -173,6 +206,10 @@ enum HeadlessCLI {
                     fellBack: { print("FELL-BACK-TO-LOCAL") },
                     failed: { error in
                         print("SYNTHESIS-FAILED: \(error)")
+                        // Stop the remaining chunks too — they'd keep
+                        // synthesizing (and billing, on cloud routes) through
+                        // the janitor drain window below otherwise.
+                        pipeline.cancel()
                         playback.stop()
                         finish(3)
                     }

@@ -170,6 +170,10 @@ final class PlaybackEngine: ObservableObject {
         player.play()
         state = .playing
         SRLog.event("playback.resume", [:])
+        // The last buffer's completion may have fired while paused (its
+        // checkFinished no-ops on state != .playing) — re-check, or a
+        // finished timeline resumes into eternal silence.
+        checkFinished()
     }
 
     func togglePauseResume() {
@@ -187,7 +191,14 @@ final class PlaybackEngine: ObservableObject {
         rateChangeWork = nil
         uiTimer?.invalidate()
         uiTimer = nil
-        if engineStarted { player.stop() }
+        if engineStarted {
+            player.stop()
+            // Release the output audio unit / device claim: a menu-bar app
+            // idles most of the time and shouldn't stay an active audio
+            // client (power drain; can pin AirPods in the call profile).
+            engine.stop()
+            engineStarted = false
+        }
         segments.removeAll()
         segmentStartFrames.removeAll()
         pendingFeeds.removeAll()
@@ -241,7 +252,13 @@ final class PlaybackEngine: ObservableObject {
     /// (content frames) at the current rate. Used by seek, restart, and
     /// rate changes; also safe while paused (stays paused at the new spot).
     private func rescheduleContent(from target: AVAudioFramePosition) {
-        guard totalFrames > 0 else { return }
+        guard totalFrames > 0 else {
+            // No audio yet, but the requested rate must still take effect —
+            // otherwise every segment appended before the first decode plays
+            // at the session-start rate until the next seek/rate change.
+            renderRate = rate
+            return
+        }
         let clamped = min(max(0, target), totalFrames - 1)
 
         generation += 1          // invalidate stale completions and chain ops
@@ -272,6 +289,10 @@ final class PlaybackEngine: ObservableObject {
         chain = Task { [weak self] in
             await previous.value
             guard let self, !Task.isCancelled else { return }
+            // Bail before stretching, not just before scheduling: stop() and
+            // reschedules orphan this chain, and WSOLA on a long article is
+            // real CPU spent on audio the generation guard would discard.
+            guard await MainActor.run(body: { self.generation == gen }) else { return }
             let stretched = await Task.detached(priority: .userInitiated) {
                 TimeStretch.stretch(buffer, rate: rate)
             }.value

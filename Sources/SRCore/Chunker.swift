@@ -25,10 +25,17 @@ public enum Chunker {
         tokenizer.string = text
 
         var raw: [(text: String, offset: Int)] = []
+        // Accumulate offsets from the previous sentence boundary: measuring
+        // each from startIndex is an O(n) walk per sentence (O(n²) on
+        // book-length input — seconds of CPU before synthesis starts).
+        var cursor = text.startIndex
+        var cursorOffset = 0
         tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
             let sentence = String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
             if !sentence.isEmpty {
-                raw.append((sentence, text.distance(from: text.startIndex, to: range.lowerBound)))
+                cursorOffset += text.distance(from: cursor, to: range.lowerBound)
+                cursor = range.lowerBound
+                raw.append((sentence, cursorOffset))
             }
             return true
         }

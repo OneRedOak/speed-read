@@ -51,7 +51,13 @@ public struct CostLedger {
         return defaults.integer(forKey: Key.spent)
     }
 
+    /// Serializes the read-modify-write: up to 3 pipeline chunks can bill
+    /// concurrently, and racing increments would silently undercount spend.
+    private static let recordLock = NSLock()
+
     public func record(billedCharacters: Int) {
+        Self.recordLock.lock()
+        defer { Self.recordLock.unlock() }
         let base = spentToday
         defaults.set(today, forKey: Key.day)
         defaults.set(base + billedCharacters, forKey: Key.spent)

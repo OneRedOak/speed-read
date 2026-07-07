@@ -11,10 +11,26 @@ import Foundation
 public final class AudioCache: @unchecked Sendable {
     public static let shared = AudioCache()
 
-    public var sizeCapBytes: Int
-    public var ttl: TimeInterval
+    // Settings are read from pipeline tasks and the eviction queue while the
+    // main thread writes them — lock rather than racing plain vars.
+    private let stateLock = NSLock()
+    private var _sizeCapBytes: Int
+    private var _ttl: TimeInterval
+    private var _enabled = true
+
+    public var sizeCapBytes: Int {
+        get { stateLock.withLock { _sizeCapBytes } }
+        set { stateLock.withLock { _sizeCapBytes = newValue } }
+    }
+    public var ttl: TimeInterval {
+        get { stateLock.withLock { _ttl } }
+        set { stateLock.withLock { _ttl = newValue } }
+    }
     /// "No-cache" toggle for sensitive sessions (P-10).
-    public var enabled: Bool = true
+    public var enabled: Bool {
+        get { stateLock.withLock { _enabled } }
+        set { stateLock.withLock { _enabled = newValue } }
+    }
 
     private let directory: URL
     private let queue = DispatchQueue(label: "com.patrickellis.sr.cache", qos: .utility)
@@ -25,8 +41,8 @@ public final class AudioCache: @unchecked Sendable {
         self.directory = directory ?? FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("sr/cache", isDirectory: true)
-        self.sizeCapBytes = sizeCapBytes
-        self.ttl = ttl
+        self._sizeCapBytes = sizeCapBytes
+        self._ttl = ttl
         try? FileManager.default.createDirectory(at: self.directory,
                                                  withIntermediateDirectories: true)
     }
@@ -70,8 +86,12 @@ public final class AudioCache: @unchecked Sendable {
         guard enabled else { return }
         let file = url(for: key)
         queue.async { [self] in
+            // Re-check: "no-cache" flipped after enqueue must stay a hard
+            // boundary — a queued write landing post-toggle would put
+            // sensitive audio on disk.
+            guard enabled else { return }
             try? data.write(to: file, options: .atomic)
-            evictIfNeeded()
+            performEviction()
         }
     }
 
@@ -97,8 +117,13 @@ public final class AudioCache: @unchecked Sendable {
             .reduce(0, +)
     }
 
-    /// TTL sweep + LRU eviction down to the size cap.
+    /// TTL sweep + LRU eviction down to the size cap. All maintenance runs
+    /// on the cache queue so two evictions never race each other.
     public func evictIfNeeded() {
+        queue.async { [self] in performEviction() }
+    }
+
+    private func performEviction() {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(
             at: directory,

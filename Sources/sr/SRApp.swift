@@ -14,13 +14,22 @@ final class SRAppDelegate: NSObject, NSApplicationDelegate {
 
 struct SRApp: App {
     @NSApplicationDelegateAdaptor(SRAppDelegate.self) private var appDelegate
-    @StateObject private var state = AppState()
+    @StateObject private var state: AppState
+
+    init() {
+        // Wire the delegate here, not in MenuView.onAppear: MenuBarExtra
+        // content is built lazily on first open, so a quit before the menu
+        // was ever opened would find state == nil and skip shutdown()
+        // (pending history deletes lost, daemon left to the watchdog).
+        let state = AppState()
+        _state = StateObject(wrappedValue: state)
+        SRAppDelegate.state = state
+    }
 
     var body: some Scene {
         MenuBarExtra {
             MenuView()
                 .environmentObject(state)
-                .onAppear { SRAppDelegate.state = state }
         } label: {
             Image(systemName: state.playback.isActive
                   ? "waveform.circle.fill" : "waveform")

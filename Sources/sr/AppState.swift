@@ -68,6 +68,13 @@ final class AppState: ObservableObject {
 
     private var statusClearTask: Task<Void, Never>?
     private var cancellables: Set<AnyCancellable> = []
+    /// Serializes selection captures: two concurrent ⌘C fallbacks snapshot/
+    /// restore each other's transient pasteboard state and can permanently
+    /// replace the user's clipboard with the selection (P-3 violation).
+    private var captureInFlight = false
+    /// Bumped per speak(); stale pipeline deliveries (a chunk that slipped
+    /// past cancellation) are dropped instead of feeding into the new session.
+    private var speakGeneration = 0
 
     init() {
         let store = SettingsStore()
@@ -112,6 +119,12 @@ final class AppState: ObservableObject {
         // Startup cache maintenance (TTL sweep + LRU).
         Task.detached(priority: .utility) {
             AudioCache.shared.evictIfNeeded()
+        }
+
+        // Keep the installed daemon script current with the bundled one —
+        // daemon fixes in app updates would otherwise never reach installs.
+        if KokoroRuntime.shared.isInstalled, let source = daemonScriptSource() {
+            KokoroRuntime.shared.installer.syncDaemonScript(from: source)
         }
 
         // Pre-warm the local daemon when it can be needed (Auto fallback or
@@ -164,9 +177,14 @@ final class AppState: ObservableObject {
         // Capture must run off the main thread: the ⌘C fallback sleeps
         // while polling the pasteboard. Strong capture is fine — AppState
         // lives for the app's lifetime and the task is short.
+        guard !captureInFlight else { return }
+        captureInFlight = true
         Task.detached { [self] in
             let result = SelectionCapture.capture()
-            await MainActor.run { handleCapture(result, routingAction: action) }
+            await MainActor.run {
+                captureInFlight = false
+                handleCapture(result, routingAction: action)
+            }
         }
     }
 
@@ -281,6 +299,13 @@ final class AppState: ObservableObject {
             "backend": routes.isLocal ? "local" : "cloud",
         ])
 
+        // Cancel the old pipeline BEFORE starting the new session, and tag
+        // this run: an old chunk already past its cancellation check would
+        // otherwise deliver the previous text's audio into the new timeline.
+        pipeline.cancel()
+        speakGeneration += 1
+        let generation = speakGeneration
+
         playback.startSession(totalSentences: chunks.count)
         playback.onFinished = { [weak self] in
             self?.refreshCredits()
@@ -297,7 +322,8 @@ final class AppState: ObservableObject {
             cache: cacheEnabled ? AudioCache.shared : nil,
             callbacks: .init(
                 deliver: { [weak self] index, audio in
-                    self?.playback.feed(index: index, audio: audio)
+                    guard let self, self.speakGeneration == generation else { return }
+                    self.playback.feed(index: index, audio: audio)
                 },
                 billed: { billed in
                     ledger.record(billedCharacters: billed)
@@ -314,7 +340,8 @@ final class AppState: ObservableObject {
                     self?.flashStatus("Cloud unavailable — using local voice")
                 },
                 failed: { [weak self] error in
-                    self?.handleSynthesisError(error)
+                    guard let self, self.speakGeneration == generation else { return }
+                    self.handleSynthesisError(error)
                 }
             )
         )

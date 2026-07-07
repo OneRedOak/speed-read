@@ -57,6 +57,7 @@ final class SynthesisPipeline: @unchecked Sendable {
 
             // Cache first (C-4): zero credits, instant.
             if let cached = cache?.lookup(cacheKey(route)) {
+                guard !Task.isCancelled else { return }
                 await callbacks.deliver(chunk.id, cached)
                 return
             }
@@ -74,6 +75,7 @@ final class SynthesisPipeline: @unchecked Sendable {
                 }
                 route = fallback!
                 if let cached = cache?.lookup(cacheKey(route)) {
+                    guard !Task.isCancelled else { return }
                     await callbacks.deliver(chunk.id, cached)
                     return
                 }
@@ -105,7 +107,21 @@ final class SynthesisPipeline: @unchecked Sendable {
                                 await MainActor.run { callbacks.failed(error) }
                             }
                         } catch {
-                            // Non-TTSError (URLSession cancellation etc.) — ignore.
+                            // Providers map their own cancellations to
+                            // TTSError.cancelled; anything else that lands
+                            // here (wire decode errors, unexpected throws)
+                            // is a real failure. Swallowing it would leave
+                            // the session waiting forever for a chunk that
+                            // never arrives.
+                            guard !Task.isCancelled, !(error is CancellationError) else { return }
+                            if errorFlag.trip() {
+                                SRLog.error("pipeline.chunk_failed",
+                                            ["error": String(describing: type(of: error))])
+                                await MainActor.run {
+                                    callbacks.failed(.network(
+                                        underlying: "synthesis failed: \(type(of: error))"))
+                                }
+                            }
                         }
                     }
                     return true

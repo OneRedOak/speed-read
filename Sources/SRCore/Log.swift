@@ -49,19 +49,25 @@ public enum SRLog {
             let fm = FileManager.default
             try? fm.createDirectory(at: url.deletingLastPathComponent(),
                                     withIntermediateDirectories: true)
-            // Simple size cap: truncate at 5 MB.
+            // Rotate at 5 MB by RENAME, not delete: deleting strands another
+            // process's open handle on an unlinked inode, silently dropping
+            // its writes. Rename keeps that handle valid (it writes into the
+            // rotated file) while this process starts a fresh one.
             if let size = try? fm.attributesOfItem(atPath: url.path)[.size] as? Int,
                size > 5_000_000 {
-                try? fm.removeItem(at: url)
+                let rotated = url.deletingPathExtension().appendingPathExtension("log.1")
+                try? fm.removeItem(at: rotated)
+                try? fm.moveItem(at: url, to: rotated)
             }
             let entry = "\(stamp.string(from: Date())) \(line)\n"
-            if let handle = try? FileHandle(forWritingTo: url) {
-                defer { try? handle.close() }
-                _ = try? handle.seekToEnd()
-                try? handle.write(contentsOf: Data(entry.utf8))
-            } else {
-                try? entry.data(using: .utf8)?.write(to: url)
-            }
+            // O_APPEND: GUI and CLI share this file; seekToEnd+write from two
+            // processes interleaves at the same offset and loses lines.
+            // Kernel-atomic appends don't.
+            let fd = open(url.path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+            guard fd >= 0 else { return }
+            let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            try? handle.write(contentsOf: Data(entry.utf8))
+            try? handle.close()
         }
     }
 }
