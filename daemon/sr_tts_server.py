@@ -129,24 +129,45 @@ def _generate_segments(text, voice, speed, lang_code, cancel_check, depth=0):
             segments.append((np.array(result.audio), result.sample_rate))
         return segments
     except ValueError as e:
-        # Even ~35-char sentences can trigger the bug; split anything that
-        # still has a word boundary to split at.
-        if "broadcast_shapes" not in str(e) or depth >= 4 or len(text) < 12:
+        if "broadcast_shapes" not in str(e):
             raise
-        mid = len(text) // 2
-        split_at = text.rfind(" ", 0, mid)
-        if split_at <= 0:
-            split_at = text.find(" ", mid)
-        if split_at <= 0:
+        if depth >= 90:
+            # Inside a punctuation-pad attempt (depth=99): no further
+            # workarounds — bubble up so the pad ladder tries the next pad.
             raise
-        log(f"broadcast_shapes workaround: splitting text_len={len(text)} at {split_at}")
-        left = _generate_segments(
-            text[:split_at].strip(), voice, speed, lang_code, cancel_check, depth + 1
-        )
-        right = _generate_segments(
-            text[split_at:].strip(), voice, speed, lang_code, cancel_check, depth + 1
-        )
-        return left + right
+        # Split at a word boundary when possible — halving usually dodges
+        # the length trigger.
+        if depth < 4 and len(text) >= 12:
+            mid = len(text) // 2
+            split_at = text.rfind(" ", 0, mid)
+            if split_at <= 0:
+                split_at = text.find(" ", mid)
+            if split_at > 0:
+                log(f"broadcast_shapes workaround: splitting text_len={len(text)} at {split_at}")
+                left = _generate_segments(
+                    text[:split_at].strip(), voice, speed, lang_code, cancel_check, depth + 1
+                )
+                right = _generate_segments(
+                    text[split_at:].strip(), voice, speed, lang_code, cancel_check, depth + 1
+                )
+                return left + right
+        # Cursed fragment: the crash is deterministic in phoneme length, so
+        # nudge the length with punctuation-only pads (no words added).
+        for pad in (",", " ,", ", ,"):
+            try:
+                log(f"broadcast_shapes workaround: padding text_len={len(text)}")
+                return _generate_segments(
+                    text + pad, voice, speed, lang_code, cancel_check, depth=99
+                )
+            except ValueError as e2:
+                if "broadcast_shapes" not in str(e2):
+                    raise
+        # Last resort: skip this fragment with a beat of silence rather than
+        # failing the entire read. Kokoro outputs 24 kHz mono.
+        import numpy as np
+
+        log(f"broadcast_shapes workaround exhausted: skipping text_len={len(text)}")
+        return [(np.zeros(6000, dtype=np.float32), 24000)]
 
 
 def generate_audio(text, voice, speed, lang_code, cancel_check=None):

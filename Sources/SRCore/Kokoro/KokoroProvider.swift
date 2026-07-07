@@ -100,6 +100,9 @@ public struct KokoroProvider: TTSProvider {
         } catch is CancellationError {
             throw TTSError.cancelled
         } catch {
+            // A sibling chunk's failure cancels this task, which closes the
+            // socket mid-read — that's a cancellation, not a daemon problem.
+            if Task.isCancelled { throw TTSError.cancelled }
             SRLog.error("kokoro.socket", ["error": String(describing: type(of: error))])
             throw TTSError.network(underlying: "kokoro: socket I/O failed")
         }

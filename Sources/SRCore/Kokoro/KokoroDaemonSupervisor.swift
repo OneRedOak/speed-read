@@ -117,10 +117,28 @@ public actor KokoroDaemonSupervisor {
                 return
             }
             if !p.isRunning {
-                // Exited during startup — either flock conflict (another
-                // daemon we don't own the token for) or a real failure.
-                // Either way our token isn't accepted: kill any stranger
-                // socket owner is not possible; count as failure.
+                if p.terminationStatus == 0 {
+                    // Exit 0 = flock conflict: another daemon holds the lock
+                    // (possibly one that's mid-shutdown, e.g. hotkey pressed
+                    // during idle unload). Wait for either its socket or the
+                    // lock to free up, then respawn once.
+                    SRLog.event("kokoro.daemon_lock_conflict", [:])
+                    let conflictDeadline = Date().addingTimeInterval(10)
+                    while Date() < conflictDeadline {
+                        if Self.socketConnectable(paths.socketPath) {
+                            consecutiveFailures = 0
+                            healthySince = Date()
+                            SRLog.event("kokoro.daemon_ready", ["via": "existing"])
+                            return
+                        }
+                        try await Task.sleep(for: .milliseconds(500))
+                    }
+                    // Lock holder never produced a socket — likely finished
+                    // dying; one respawn attempt.
+                    consecutiveFailures += 1
+                    try await spawn()
+                    return
+                }
                 consecutiveFailures += 1
                 throw SupervisorError.spawnFailed(
                     "daemon exited during startup (status \(p.terminationStatus))")
