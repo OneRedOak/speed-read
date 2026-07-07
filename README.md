@@ -93,6 +93,11 @@ make app       # release build → dist/sr.app (locally signed)
 make run       # build + launch from dist/
 ```
 
+Two toolchain notes:
+
+- **Signing / Accessibility across rebuilds**: without a codesigning identity, builds are ad-hoc signed and macOS forgets the Accessibility grant after every rebuild. Create a self-signed code-signing certificate named `sr-dev` (Keychain Access → Certificate Assistant → Create a Certificate… → type *Code Signing*) and `build-app.sh` picks it up automatically, making the grant stick.
+- **`make test` targets a Command-Line-Tools-only toolchain** (it wires the Swift Testing framework paths manually). With full Xcode installed, plain `swift test` should also work.
+
 Layout: `Sources/SRCore` (engine: normalizer, providers, cache, cost, privacy — fully testable), `Sources/sr` (menu bar app, playback, capture, CLI), `daemon/` (local TTS daemon), `Tests/` (parity fixtures + unit tests). `PROGRESS.md` tracks the build log and roadmap (Shortcuts, MCP server, URL scheme, notarized releases).
 
 ## Credits

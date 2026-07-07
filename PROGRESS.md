@@ -1,6 +1,6 @@
 # sr — build progress
 
-PRD: see conversation / repo root. Reference implementation cloned at `reference/` (Speak11, Unlicense).
+PRD: see conversation / repo root. Reference implementation: [Speak11](https://github.com/smcantab/speak11) (Unlicense) — clone it into `reference/` (gitignored) to compare against the ported code.
 
 ## Decisions (Phase 0, 2026-07-06)
 
@@ -45,12 +45,27 @@ PRD: see conversation / repo root. Reference implementation cloned at `reference
 - [x] Phase 2 code — P-6 HistoryJanitor (on by default; leftover Phase-1 history manually purged, account history verified empty), P-8 routing rules (`rules.json`, password managers blocked) + Local-Only backend mode, P-9 Kokoro daemon (Unix socket + per-launch token), P-10 cache (SHA-256 keys, 500 MB LRU, 30-day TTL, purge + no-cache toggle), P-12 pins (mlx-audio==0.4.4, model rev a71e4d38…, weights SHA-256 recorded), F-3 Kokoro provider + Auto cloud→local fallback (one-way, never local→cloud), F-9 cache-first, C-1 credits + spent-today (exact `character-cost` header), C-2 daily budget 30k w/ 80% warn + hard stop + override, C-3 large-read confirm ≥8k chars. 30 tests green.
 - [x] Phase 2 acceptance (2026-07-06):
   - **T-3 concealed refusal ✓** — pasteboard item with `org.nspasteboard.ConcealedType` refused (`CONCEALED-REFUSED`, exit 2); sentinel absent from logs/App Support/prefs.
-  - **T-6 privacy sweep ✓** — sentinel phrases spoken through the full cloud pipeline: zero hits in logs, Application Support, UserDefaults; cache filenames are hashes; no lingering temp audio; ElevenLabs history empty immediately after (janitor). Network observation: traffic egresses via the user's Freedom proxy (localhost:7769) → endpoint-level external observation should be done in Freedom/Little Snitch if desired; sr's own logs show only elevenlabs events.
+  - **T-6 privacy sweep ✓** — sentinel phrases spoken through the full cloud pipeline: zero hits in logs, Application Support, UserDefaults; cache filenames are hashes; no lingering temp audio; ElevenLabs history empty immediately after (janitor). Network observation: endpoint-level external verification is best done with a local proxy or Little Snitch; sr's own logs show only elevenlabs events.
   - **T-7 auto fallback ✓** — simulated 429 (SR_SIMULATE_CLOUD_FAILURE=1 seam): `pipeline.fallback` fired, remaining sentences synthesized+played via local Kokoro, exit 0. Cold daemon start ~10 s; GUI pre-warms the daemon at launch when backend ≠ cloud so the warm path meets the 2 s bar.
   - Fixes landed during acceptance: shared daemon token via 0600 `daemon.token` file (GUI+CLI share one daemon); supervisor actor-reentrancy fix (single in-flight startup task); missing `misaki[en]==0.9.4` + pinned spaCy model wheel added to installer (P-12); daemon-side split-retry workaround for mlx-audio 0.4.4 `broadcast_shapes` bug (upstream fix exists post-0.4.4 — **open decision**: bump the mlx-audio pin to a git revision, needs owner sign-off).
   - CLI seed shipped (A-1 partial): `sr --speak <file|->`, `sr --speak-clipboard`, `sr --install-kokoro`, `--local` flag.
 - [ ] Phase 3 — transport polish, sign/notarize, v1.0
 - [ ] Phase 4 — automations (CLI → Shortcuts → MCP → scheme)
+
+## Open items from the 2026-07-07 pre-release audit
+
+Fixed in that pass: daemon request validation + size caps + token-perms repair, runtime model-load pinning (SR_MODEL_PATH from the verified manifest), pipeline error-swallow hang, stale-delivery race, concurrent-capture clipboard clobber, CostLedger atomicity, CLI usage handling, playback engine lifecycle (rate-before-first-chunk, finish-across-pause, orphaned stretch chain, engine idle stop), log O_APPEND + rotate-by-rename, Chunker O(n²) offsets, ElevenLabs URL encoding. Full audit trail: `.review-and-push/triage-20260707-full-repo.md` (untracked).
+
+Deliberately deferred:
+
+- **Supply-chain hashes**: only top-level Python pins; transitive deps + spaCy wheel unverified. Fix = `uv pip compile --generate-hashes` lockfile installed with `--require-hashes` (needs online resolution; changes installer flow).
+- **Playback position drift under buffer underrun**: player sampleTime counts starvation silence as consumed content, so a seek after a long stall can skip audio. Fix is a per-buffer accounting rework of PlaybackEngine position math.
+- **Decode-failure policy**: a corrupt chunk becomes a silent 1-frame skip (logged, not surfaced). Decide: fail the read loudly vs. skip with a status flash. Related: cloud audio accepted on HTTP 200 alone (no magic-byte sniff).
+- **AX-path concealed content**: the P-4 refusal covers pasteboard types only; `kAXSelectedTextAttribute` from an app not in the routing blocklist bypasses it. Password-manager blocklist is static + allow-on-unknown.
+- **Budget is preflight-only**: chunks already in flight keep billing after the daily cap trips mid-read; no global input-size cap.
+- **Daemon connection cap**: unlimited concurrent pre-auth connections (thread each, 10 s timeout); request-size cap added, connection cap not.
+- **CI**: no workflow proves a clean clone builds on a stranger's machine (macos-14 `swift build` would).
+- **⌘C fallback late-copy edge**: a copy landing after the 0.6 s poll timeout + restore leaves the selection on the clipboard.
 
 ## Deviations from PRD
 

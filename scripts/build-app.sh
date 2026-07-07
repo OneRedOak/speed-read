@@ -40,7 +40,7 @@ cat > "$BUNDLE_DIR/Contents/Info.plist" <<'PLIST'
     <key>CFBundleVersion</key>           <string>1</string>
     <key>LSMinimumSystemVersion</key>    <string>14.0</string>
     <key>LSUIElement</key>               <true/>
-    <key>NSHumanReadableCopyright</key>  <string>Public domain intent; see LICENSE.</string>
+    <key>NSHumanReadableCopyright</key>  <string>© 2026 Patrick Ellis. MIT License.</string>
 </dict>
 </plist>
 PLIST
