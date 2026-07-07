@@ -1,105 +1,106 @@
 # sr
 
-A privacy-first, automation-ready text-to-speech utility for macOS.
-Select text in any app, press **⌥⇧/**, hear it read aloud in a modern AI
-voice. Rebuilt from the public-domain [Speak11](https://github.com/smcantab/speak11)
-reference implementation as a single native Swift app.
+**Select text in any Mac app, press a hotkey, hear it read aloud in a state-of-the-art AI voice.**
 
-## Status
+sr is a privacy-first text-to-speech utility for macOS. It lives in your menu bar, reads whatever you select — articles, PDFs, emails, docs — using ElevenLabs cloud voices or a fully offline local model, at any speed from 0.5× to 3× with pitch preserved. Every byte that leaves your machine is explicit, minimal, and controllable: no telemetry, no content in logs, cloud history auto-deleted after every read, and a Local-Only mode where text never leaves the Mac at all.
 
-Phase 1 (MVP). See `PROGRESS.md` for the phase plan and `CHANGELOG.md` for
-history.
+## Features
+
+- **Read anything, anywhere** — global hotkey (default ⌥⇧/) speaks the current selection in Safari, Chrome, Preview PDFs, VS Code, Slack, Mail, Terminal. Accessibility-API capture first; clipboard fallback restores your clipboard byte-for-byte.
+- **Top-tier voices** — ElevenLabs (Flash v2.5 / Turbo / Multilingual v2 / v3) with your account's full voice list, or the local Kokoro model (free, offline, Apple Silicon).
+- **Instant, pitch-perfect speed** — 0.5×–3.0× applied client-side with time-domain (WSOLA) stretching. Changing speed never re-generates audio and never costs credits.
+- **Full transport** — play/pause, ±5 s seek, restart, stop, live progress, from the menu bar panel.
+- **Smart text cleanup** — PDF line-break repair, LaTeX math to spoken English, Markdown stripping, citations, units, URLs — ported from [Speak11](https://github.com/smcantab/speak11) and parity-tested.
+- **Cache-first** — repeated reads are instant and free (content-addressed local cache, size-capped, purgeable, disableable).
+- **Cost controls** — live credit display, exact per-read billing, daily budget with warning/hard-stop, large-read confirmation.
+- **Privacy by construction** — see [Privacy](#privacy).
+
+## Requirements
+
+- macOS 14+ on Apple Silicon
+- Swift 6 toolchain (Xcode Command Line Tools are enough: `xcode-select --install`)
+- An [ElevenLabs](https://elevenlabs.io) API key for cloud voices (free tier works), and/or ~330 MB of disk for the offline voice
+- [`uv`](https://docs.astral.sh/uv/) only if you install the offline voice
+
+## Install
+
+```sh
+git clone https://github.com/OneRedOak/speed-read.git
+cd speed-read
+make install        # builds sr.app and installs it to /Applications
+```
+
+Then, one-time setup:
+
+1. **Grant Accessibility** when prompted (System Settings → Privacy & Security → Accessibility → enable **sr**). This is what lets sr read your selection; the hotkey itself works without it.
+2. **Add your ElevenLabs key**: menu bar → waveform icon → Settings… → paste key → Save. It is stored only in the macOS Keychain. Recommended: create a dedicated key scoped to *Text-to-Speech + User Read*, and opt out of training under ElevenLabs → Terms & Privacy → Data Use.
+3. *(Optional, for offline use)* click **Install Local Voice (Kokoro, ~330 MB)** in the menu. Pinned, checksum-verified download.
+4. *(Optional)* System Settings → General → Login Items → **+** → `/Applications/sr.app` to start at login.
 
 ## Usage
 
-- **⌥⇧/** — speak the current selection; press again to stop
-- **⌥⇧.** — pause / resume
-- Menu bar icon — transport, live speed slider (0.5×–3.0×, pitch-preserving,
-  never re-generates audio), voice & model pickers, credits display,
-  "Speak Clipboard", hotkey recorders, API key entry
+| Action | How |
+|---|---|
+| Speak selection | Select text anywhere, press **⌥⇧/** (re-press replaces the current read) |
+| Pause / resume | **⌥⇧.** or the menu panel |
+| Seek, restart, stop, speed | Menu bar panel — transport buttons, slider, one-click speed presets |
+| Speak clipboard | Menu → Speak Clipboard |
+| Change hotkeys | Menu → Settings… |
+| Backend | **Auto** (cloud, falls back to local), **Cloud**, **Local 🔒** |
 
-## Build
-
-Requires macOS 14+, Apple Silicon, and Swift 6 (Command Line Tools are
-sufficient — no Xcode needed).
-
-```sh
-make app      # builds dist/sr.app
-make run      # builds + launches
-make install  # builds + copies to /Applications + launches
-make test     # unit + normalization parity tests
-```
-
-## Running & restarting
-
-sr is a menu bar app (the waveform icon); it has no Dock icon. After
-quitting it ("Quit sr" at the bottom of the menu), restart it any of
-these ways:
-
-- **Spotlight / Launchpad** — if installed via `make install`, hit ⌘Space,
-  type "sr", return. This is the recommended setup.
-- **Finder** — double-click `/Applications/sr.app` (or `dist/sr.app` in
-  the repo if you haven't installed it).
-- **Terminal** — `open /Applications/sr.app`, or from the repo:
-  `open dist/sr.app` / `make run` (rebuilds first).
-
-Only run one copy at a time: if you use both the repo build and the
-/Applications copy, quit one before launching the other.
-
-Permissions (Accessibility) and the Keychain entry follow the app's
-signing identity, not its location — moving or rebuilding the app does
-not re-prompt.
-
-To start sr automatically at login: System Settings → General →
-Login Items & Extensions → "+" → select `/Applications/sr.app`. (A
-built-in "Launch at login" toggle via SMAppService is planned for
-Phase 3.)
-
-First launch prompts for **Accessibility** permission (needed for the
-global hotkey and reading the selection; sr reads the selection via the
-Accessibility API first and only falls back to a simulated ⌘C — with full
-clipboard save/restore — where AX is unavailable).
-
-## API key
-
-The ElevenLabs API key lives **only** in the macOS Keychain
-(item: `sr — ElevenLabs API Key`). Add it from the menu bar (Settings →
-"Add ElevenLabs API Key…") or:
+CLI (same binary):
 
 ```sh
-security add-generic-password -a elevenlabs -s "sr — ElevenLabs API Key" -w
+/Applications/sr.app/Contents/MacOS/sr --speak article.md      # or "-" for stdin
+/Applications/sr.app/Contents/MacOS/sr --speak-clipboard --local
 ```
 
-Recommended account hardening (one-time, see PRD P-7): opt out of training
-under Terms & Privacy → Data Use; use a dedicated key scoped to
-Text-to-Speech + User Read only.
+## Privacy
 
-## Network endpoints (complete list)
-
-sr never phones home. The complete list of hosts it may ever contact:
+- **Keychain-only credentials** — the API key never touches a config file or environment variable; the UI shows at most its last 4 characters.
+- **Clipboard integrity** — the ⌘C fallback snapshots and restores your full clipboard (images, RTF, files) and verifies via change count.
+- **Concealed-content refusal** — anything a password manager marks concealed (`org.nspasteboard.ConcealedType`) is never spoken, cached, logged, or transmitted.
+- **Content-free logging** — logs record counts, latencies, and status codes. Never your text.
+- **Cloud history auto-delete** — every ElevenLabs generation is deleted from your account history seconds after synthesis (on by default; best-effort — see ElevenLabs' retention docs for backup windows).
+- **Per-app routing** — block sr in specific apps or force the local voice for sensitive ones (`~/Library/Application Support/sr/rules.json`); password managers are blocked out of the box.
+- **Zero telemetry.** The complete list of hosts sr will ever contact:
 
 | Host | When |
 |---|---|
-| `api.elevenlabs.io` | Cloud synthesis, voice list, credit display, history auto-delete |
-| `api.github.com` | Manual "Check for updates" only (Phase 3+) |
-| `huggingface.co` | Explicit local-model (Kokoro) install only (Phase 2+) |
+| `api.elevenlabs.io` | Cloud synthesis, voice list, credits, history deletion |
+| `huggingface.co` | Only during the explicit local-voice install |
+| `github.com` / PyPI | Only during the explicit local-voice install (pinned Python packages) |
 
-No analytics, no crash uploaders, no auto-update phone-home. Logging is
-content-free by design: `~/Library/Logs/sr/sr.log` records counts,
-latencies, and HTTP statuses — never the text being spoken.
+Local synthesis runs in a supervised daemon bound to a Unix socket (0600) with per-launch auth — no network listener, ever.
 
-## Privacy properties
+## Uninstall
 
-- Keychain-only credentials; the UI shows at most the last 4 characters
-- Accessibility-API-first capture; ⌘C fallback snapshots and restores the
-  full pasteboard (images, RTF, files) and verifies via `changeCount`
-- Concealed pasteboard items (`org.nspasteboard.ConcealedType`, the
-  password-manager standard) are refused: never spoken, cached, logged,
-  or transmitted
-- API playback speed is pinned at 1.0; speed changes are client-side
-  time-stretch — instant, free, and cache-friendly
+```sh
+osascript -e 'quit app "sr"'
+rm -rf /Applications/sr.app ~/Library/Application\ Support/sr ~/Library/Logs/sr
+security delete-generic-password -a elevenlabs -s "sr — ElevenLabs API Key"
+defaults delete com.patrickellis.sr
+```
+
+Then remove **sr** from System Settings → Privacy & Security → Accessibility.
+
+## Development
+
+```sh
+make build     # debug build
+make test      # unit + normalization parity tests (Swift Testing)
+make app       # release build → dist/sr.app (locally signed)
+make run       # build + launch from dist/
+```
+
+Layout: `Sources/SRCore` (engine: normalizer, providers, cache, cost, privacy — fully testable), `Sources/sr` (menu bar app, playback, capture, CLI), `daemon/` (local TTS daemon), `Tests/` (parity fixtures + unit tests). `PROGRESS.md` tracks the build log and roadmap (Shortcuts, MCP server, URL scheme, notarized releases).
+
+## Credits
+
+- [Speak11](https://github.com/smcantab/speak11) (Unlicense) — the reference implementation whose text-normalization rules, capture strategy, and fallback design sr ports and builds on. Read it; it's good.
+- [Kokoro](https://huggingface.co/mlx-community/Kokoro-82M-bf16) via [mlx-audio](https://github.com/Blaizzy/mlx-audio) — the local voice.
+- [KeyboardShortcuts](https://github.com/sindresorhus/KeyboardShortcuts) (MIT) — hotkey registration.
 
 ## License
 
-Built from the Unlicense'd Speak11; this repository keeps the same
-public-domain spirit (license file TBD before any public release).
+[MIT](LICENSE)
