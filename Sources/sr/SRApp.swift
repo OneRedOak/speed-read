@@ -236,6 +236,11 @@ struct MenuView: View {
     private var bottomRow: some View {
         HStack {
             Button("Settings…") {
+                // Accessory apps never truly become active, so key events
+                // bypass their windows (the shortcut recorder would focus but
+                // receive nothing). Become a regular app while Settings is
+                // open; SettingsView.onDisappear restores accessory mode.
+                NSApp.setActivationPolicy(.regular)
                 NSApp.activate(ignoringOtherApps: true)
                 openSettings()
             }
@@ -317,5 +322,19 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 420)
         .fixedSize(horizontal: false, vertical: true)
+        .onAppear {
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
+            // The Settings window can open behind the menu bar panel;
+            // bring it to front once it exists.
+            DispatchQueue.main.async {
+                NSApp.windows
+                    .first { $0.identifier?.rawValue.contains("Settings") == true || $0.title.contains("Settings") }?
+                    .makeKeyAndOrderFront(nil)
+            }
+        }
+        .onDisappear {
+            NSApp.setActivationPolicy(.accessory)
+        }
     }
 }
