@@ -180,16 +180,11 @@ struct MenuView: View {
     // MARK: Backend & voices (F-3, P-8 Local-Only)
 
     private var backendPicker: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Picker("Backend", selection: $state.backendMode) {
-                Text("Auto").tag(SettingsStore.BackendMode.auto)
-                Text("Cloud").tag(SettingsStore.BackendMode.cloud)
-                Text("Local 🔒").tag(SettingsStore.BackendMode.local)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
+        VStack(alignment: .leading, spacing: 5) {
+            BackendSelector(selection: $state.backendMode)
             Text(backendCaption)
                 .font(.caption2).foregroundStyle(.tertiary)
+                .padding(.leading, 2)
         }
     }
 
@@ -342,6 +337,79 @@ private struct TransportButton: View {
         .onHover { hovering = $0 }
         .help(help)
         .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+/// Full-width backend selector styled to match the panel's rounded
+/// language (same radius family as the Speak Clipboard button): a soft
+/// container, equal-width segments, accent fill on the active one.
+private struct BackendSelector: View {
+    @Binding var selection: SettingsStore.BackendMode
+
+    var body: some View {
+        HStack(spacing: 3) {
+            segment(.auto, title: "Auto", icon: nil,
+                    help: "Cloud voices, local fallback if the cloud fails")
+            segment(.cloud, title: "Cloud", icon: nil,
+                    help: "ElevenLabs only")
+            segment(.local, title: "Local", icon: "lock.fill",
+                    help: "Nothing ever leaves this Mac")
+        }
+        .padding(3)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(.quaternary.opacity(0.5))
+        )
+        .animation(.easeOut(duration: 0.15), value: selection)
+    }
+
+    private func segment(_ mode: SettingsStore.BackendMode,
+                         title: String, icon: String?, help: String) -> some View {
+        BackendSegment(
+            title: title,
+            icon: icon,
+            isActive: selection == mode,
+            help: help
+        ) {
+            selection = mode
+        }
+    }
+}
+
+private struct BackendSegment: View {
+    let title: String
+    let icon: String?
+    let isActive: Bool
+    let help: String
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Text(title)
+                    .font(.callout.weight(isActive ? .semibold : .regular))
+                if let icon {
+                    Image(systemName: icon)
+                        .font(.system(size: 9, weight: .semibold))
+                        .opacity(isActive ? 1 : 0.55)
+                }
+            }
+            .foregroundStyle(isActive ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(isActive
+                        ? AnyShapeStyle(Color.accentColor)
+                        : hovering ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear))
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(help)
     }
 }
 
