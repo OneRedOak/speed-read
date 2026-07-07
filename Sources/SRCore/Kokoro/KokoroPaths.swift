@@ -30,5 +30,10 @@ public struct KokoroPaths: Sendable {
     /// as the 0600 socket; lets GUI + CLI instances share one daemon.
     public var tokenFile: URL { base.appendingPathComponent("daemon.token") }
     public var manifest: URL { base.appendingPathComponent("manifest.json") }
+    /// Symlink to the manifest's hash-verified model snapshot. The daemon
+    /// loads the model through this path (SR_MODEL_PATH) so it runs exactly
+    /// the verified bytes. The name matters: mlx-audio derives the model
+    /// TYPE from the path's basename, so it must read as a Kokoro repo.
+    public var modelLink: URL { base.appendingPathComponent("Kokoro-82M-bf16") }
     public var tmpRoot: URL { base.appendingPathComponent("tmp", isDirectory: true) }
 }

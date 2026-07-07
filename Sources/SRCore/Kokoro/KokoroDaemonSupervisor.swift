@@ -75,7 +75,7 @@ public actor KokoroDaemonSupervisor {
 
     private var startupTask: Task<Void, Error>?
 
-    private func spawn() async throws {
+    private func spawn(retryOnLockConflict: Bool = true) async throws {
         stopProcess()
 
         lastSpawnAttempt = Date()
@@ -91,8 +91,24 @@ public actor KokoroDaemonSupervisor {
         let p = Process()
         p.executableURL = paths.venvPython
         p.arguments = [paths.daemonScript.path, "--managed"]
-        p.environment = ProcessInfo.processInfo.environment.merging(
-            ["SR_DAEMON_TOKEN": token]) { _, new in new }
+        var env = ["SR_DAEMON_TOKEN": token]
+        // P-12: hand the daemon the installer's hash-verified snapshot so it
+        // runs exactly the verified bytes, not whatever the HF cache resolves
+        // the model ID to. Passed via a stable "Kokoro-82M-bf16" symlink —
+        // mlx-audio derives the model TYPE from the basename, so the raw
+        // snapshot dir (named by revision hash) would not load. Missing/stale
+        // manifest → no env var → daemon falls back to the model ID.
+        let fm = FileManager.default
+        if let manifest = try? KokoroInstaller(paths: paths).loadManifest(),
+           fm.fileExists(atPath: manifest.snapshotPath) {
+            try? fm.removeItem(at: paths.modelLink)
+            try? fm.createSymbolicLink(at: paths.modelLink,
+                                       withDestinationURL: URL(fileURLWithPath: manifest.snapshotPath))
+            if fm.fileExists(atPath: paths.modelLink.path) {
+                env["SR_MODEL_PATH"] = paths.modelLink.path
+            }
+        }
+        p.environment = ProcessInfo.processInfo.environment.merging(env) { _, new in new }
         p.standardInput = FileHandle.nullDevice
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
@@ -133,9 +149,14 @@ public actor KokoroDaemonSupervisor {
                         try await Task.sleep(for: .milliseconds(500))
                     }
                     // Lock holder never produced a socket — likely finished
-                    // dying; one respawn attempt.
+                    // dying; one respawn attempt. Bounded: a second conflict
+                    // means the holder is wedged, and recursing again would
+                    // spawn a python process every 10 s forever.
                     consecutiveFailures += 1
-                    try await spawn()
+                    guard retryOnLockConflict else {
+                        throw SupervisorError.startupTimeout
+                    }
+                    try await spawn(retryOnLockConflict: false)
                     return
                 }
                 consecutiveFailures += 1

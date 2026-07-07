@@ -62,11 +62,21 @@ public struct ElevenLabsProvider: TTSProvider {
         }
         guard let key = KeychainStore.readAPIKey() else { throw TTSError.missingAPIKey }
 
-        var components = URLComponents(
-            string: "https://api.elevenlabs.io/v1/text-to-speech/\(voiceID)/stream")!
+        // Voice IDs come from settings / the voices API — encode rather than
+        // trust, and fail cleanly instead of force-unwrapping.
+        guard let encodedVoice = voiceID.addingPercentEncoding(
+                withAllowedCharacters: .alphanumerics),
+              var components = URLComponents(
+                string: "https://api.elevenlabs.io/v1/text-to-speech/\(encodedVoice)/stream")
+        else {
+            throw TTSError.http(status: 400, body: "invalid voice ID")
+        }
         components.queryItems = [URLQueryItem(name: "output_format", value: Self.outputFormat)]
+        guard let url = components.url else {
+            throw TTSError.http(status: 400, body: "invalid voice ID")
+        }
 
-        var request = URLRequest(url: components.url!)
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 30
         request.setValue(key, forHTTPHeaderField: "xi-api-key")
@@ -175,8 +185,12 @@ public struct ElevenLabsProvider: TTSProvider {
     /// transient failures.
     public func deleteHistoryItem(_ historyItemID: String) async -> Int? {
         guard let key = KeychainStore.readAPIKey() else { return nil }
-        var request = URLRequest(
-            url: URL(string: "https://api.elevenlabs.io/v1/history/\(historyItemID)")!)
+        // History IDs come from a response header — encode, don't trust.
+        guard let encodedID = historyItemID.addingPercentEncoding(
+                withAllowedCharacters: .alphanumerics),
+              let url = URL(string: "https://api.elevenlabs.io/v1/history/\(encodedID)")
+        else { return nil }
+        var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
         request.setValue(key, forHTTPHeaderField: "xi-api-key")
         request.timeoutInterval = 15

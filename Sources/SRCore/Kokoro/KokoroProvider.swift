@@ -88,7 +88,14 @@ public struct KokoroProvider: TTSProvider {
             speed: "1.0",
             lang_code: String(voiceID.prefix(1))
         )
-        let requestLine = try KokoroWire.encode(request)
+        let requestLine: String
+        do {
+            requestLine = try KokoroWire.encode(request)
+        } catch {
+            // Map wire errors into TTSError: anything else escapes the
+            // pipeline's error handling entirely (the read would hang).
+            throw TTSError.http(status: 500, body: "kokoro: request encoding failed")
+        }
 
         let responseLine: String
         do {
@@ -107,12 +114,26 @@ public struct KokoroProvider: TTSProvider {
             throw TTSError.network(underlying: "kokoro: socket I/O failed")
         }
 
-        let response = try KokoroWire.decodeResponse(responseLine)
+        let response: KokoroWire.Response
+        do {
+            response = try KokoroWire.decodeResponse(responseLine)
+        } catch {
+            SRLog.error("kokoro.protocol", ["error": String(describing: type(of: error))])
+            throw TTSError.http(status: 500, body: "kokoro: malformed daemon response")
+        }
         switch response {
         case .error(let message):
             throw TTSError.http(status: 500, body: message)
         case .ok(let audioFilePath):
-            let url = URL(fileURLWithPath: audioFilePath)
+            // Trust boundary: only accept paths inside the daemon's tmp root.
+            // We read the file AND delete its parent directory — a stale or
+            // hostile daemon must not be able to point that at ~/Documents.
+            let tmpRoot = runtime.paths.tmpRoot.resolvingSymlinksInPath().path
+            let url = URL(fileURLWithPath: audioFilePath).resolvingSymlinksInPath()
+            guard url.path.hasPrefix(tmpRoot + "/") else {
+                SRLog.error("kokoro.protocol", ["error": "audio path outside tmp root"])
+                throw TTSError.http(status: 500, body: "kokoro: unexpected audio path")
+            }
             defer {
                 // Client owns the temp dir (see daemon protocol doc).
                 try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
@@ -196,37 +217,49 @@ enum UnixSocketLineClient {
                 }
             }
         } onCancel: {
-            fdBox.closeNow()
+            fdBox.cancel()
         }
     }
 
-    /// Thread-safe holder so cancellation can close the fd from any thread.
+    /// Thread-safe holder so cancellation can unblock I/O from any thread.
+    ///
+    /// Cancellation uses shutdown(2), not close(2): closing from a foreign
+    /// thread frees the fd NUMBER, which the kernel may immediately reassign
+    /// to an unrelated descriptor that the still-running I/O loop would then
+    /// read/write. shutdown() wakes blocked I/O but keeps the number reserved;
+    /// only the owning thread's `closeIfOpen()` (via defer) actually closes.
     final class FDBox: @unchecked Sendable {
         private let lock = NSLock()
         private var fd: Int32 = -1
-        private var closed = false
+        private var cancelled = false
 
         /// Returns false if already cancelled (fd should not be used).
         func set(_ newFD: Int32) -> Bool {
             lock.lock()
             defer { lock.unlock() }
-            if closed { return false }
+            if cancelled { return false }
             fd = newFD
             return true
         }
 
-        func closeNow() {
+        /// Called from the cancellation handler (any thread).
+        func cancel() {
             lock.lock()
             defer { lock.unlock() }
-            closed = true
+            cancelled = true
+            if fd >= 0 {
+                shutdown(fd, SHUT_RDWR)
+            }
+        }
+
+        /// Called only by the owning I/O thread, in its defer.
+        func closeIfOpen() {
+            lock.lock()
+            defer { lock.unlock() }
             if fd >= 0 {
                 close(fd)
                 fd = -1
             }
-        }
-
-        func closeIfOpen() {
-            closeNow()
         }
     }
 

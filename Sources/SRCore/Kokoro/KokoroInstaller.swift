@@ -68,6 +68,27 @@ public struct KokoroInstaller: Sendable {
         return try JSONDecoder().decode(Manifest.self, from: data)
     }
 
+    /// Refresh the installed daemon script when the bundled one changed.
+    /// The daemon runs from the App Support copy made at install time —
+    /// without this, daemon fixes shipped in app updates never reach
+    /// existing installs.
+    public func syncDaemonScript(from source: URL) {
+        guard isInstalled,
+              let bundled = try? Data(contentsOf: source) else { return }
+        let installed = try? Data(contentsOf: paths.daemonScript)
+        guard bundled != installed else { return }
+        do {
+            let fm = FileManager.default
+            if fm.fileExists(atPath: paths.daemonScript.path) {
+                try fm.removeItem(at: paths.daemonScript)
+            }
+            try bundled.write(to: paths.daemonScript)
+            SRLog.event("kokoro.daemon_script_synced", [:])
+        } catch {
+            SRLog.error("kokoro.daemon_script_sync", ["error": String(describing: error)])
+        }
+    }
+
     /// Locate the uv binary (PATH, then the usual install locations).
     public static func findUV() -> URL? {
         var candidates = (ProcessInfo.processInfo.environment["PATH"] ?? "")
@@ -91,6 +112,8 @@ public struct KokoroInstaller: Sendable {
                         continuation.yield($0)
                     }
                     continuation.yield(.done)
+                } catch is CancellationError {
+                    SRLog.event("kokoro.install_cancelled", [:])
                 } catch {
                     let message = (error as? InstallError)?.message
                         ?? error.localizedDescription
@@ -122,9 +145,14 @@ public struct KokoroInstaller: Sendable {
         // 1. venv (pinned interpreter; uv fetches a standalone build if needed)
         progress(.creatingVenv)
         try await run(uv, ["venv", "--python", Self.pythonVersion, paths.venvDir.path])
+        try Task.checkCancellation()
 
         // 2. pinned mlx-audio + misaki (misaki is optional upstream but
         // required for Kokoro English synthesis)
+        // TODO(P-12 follow-up): only top-level versions are pinned here —
+        // transitive deps and the spaCy wheel are not hash-verified. Proper
+        // fix: ship a `uv pip compile --generate-hashes` lockfile and install
+        // with --require-hashes.
         progress(.installingPackages)
         try await run(uv, [
             "pip", "install",
@@ -134,11 +162,15 @@ public struct KokoroInstaller: Sendable {
             Self.spacyModelWheel,
         ], timeout: 900)
 
+        try Task.checkCancellation()
+
         // 3. daemon script
         if fm.fileExists(atPath: paths.daemonScript.path) {
             try fm.removeItem(at: paths.daemonScript)
         }
         try fm.copyItem(at: daemonSourceURL, to: paths.daemonScript)
+
+        try Task.checkCancellation()
 
         // 4. model download at the pinned revision (huggingface.co — the
         // only network fetch, per the P-11 allowlist; explicit user action)
@@ -218,11 +250,25 @@ public struct KokoroInstaller: Sendable {
         process.standardError = err
         process.standardInput = FileHandle.nullDevice
 
+        // Arm the termination signal BEFORE run(): a handler assigned after
+        // an instant exec failure never fires, hanging the install forever.
+        // AsyncStream buffers the yield, so termination-before-await is safe.
+        let terminated = AsyncStream<Void> { cont in
+            process.terminationHandler = { _ in
+                cont.yield()
+                cont.finish()
+            }
+        }
+
         try process.run()
 
         let watchdog = Task {
             try await Task.sleep(for: .seconds(timeout))
-            if process.isRunning { process.terminate() }
+            guard process.isRunning else { return }
+            process.terminate()
+            // SIGTERM escalation: a child ignoring it would hang the install.
+            try await Task.sleep(for: .seconds(5))
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
         }
         defer { watchdog.cancel() }
 
@@ -230,9 +276,14 @@ public struct KokoroInstaller: Sendable {
         async let stdoutData = out.fileHandleForReading.readToEndAsync()
         async let stderrData = err.fileHandleForReading.readToEndAsync()
 
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            process.terminationHandler = { _ in cont.resume() }
+        // Cancelling the install (user quits mid-download) must kill the
+        // subprocess — uv/pip/python otherwise keep running to completion.
+        await withTaskCancellationHandler {
+            for await _ in terminated { break }
+        } onCancel: {
+            if process.isRunning { process.terminate() }
         }
+        try Task.checkCancellation()
 
         let stdout = String(data: await stdoutData, encoding: .utf8) ?? ""
         guard process.terminationStatus == 0 else {

@@ -50,6 +50,15 @@ LOG_FILE = os.path.join(LOG_DIR, "kokoro.log")
 
 MODEL_ID = "mlx-community/Kokoro-82M-bf16"
 
+# Verified local snapshot (P-12): the supervisor passes the installer's
+# hash-verified snapshot directory so the daemon runs exactly the bytes
+# that were checked — never whatever the HF cache resolves MODEL_ID to.
+MODEL_PATH = os.environ.get("SR_MODEL_PATH", "")
+
+# Requests are single sentences (the client chunks upstream); 1 MB is
+# orders of magnitude above any legitimate request line.
+MAX_REQUEST_BYTES = 1_000_000
+
 # Idle timeout in seconds (non-managed mode).
 IDLE_TIMEOUT = int(os.environ.get("SR_IDLE_TIMEOUT", "300"))
 
@@ -87,8 +96,12 @@ def load_tts_model():
     global model
     from mlx_audio.tts.utils import load_model
 
-    log(f"loading model {MODEL_ID}")
-    model = load_model(MODEL_ID)
+    if MODEL_PATH and os.path.isdir(MODEL_PATH):
+        log("loading model from verified snapshot path")
+        model = load_model(MODEL_PATH)
+    else:
+        log(f"loading model {MODEL_ID}")
+        model = load_model(MODEL_ID)
     log("model loaded")
 
 
@@ -244,6 +257,10 @@ def handle_client(conn):
             data += chunk
             if b"\n" in data:
                 break
+            if len(data) > MAX_REQUEST_BYTES:
+                log(f"request rejected: oversized ({len(data)} bytes, no newline)")
+                send({"status": "error", "message": "request too large"})
+                return
 
         if not data.strip():
             return
@@ -256,10 +273,29 @@ def handle_client(conn):
             send({"status": "error", "message": "unauthorized"})
             return
 
+        # ── Validation: reject rather than let bad values reach the model,
+        # and never log raw request fields (log-line forgery / content leaks).
         text = request.get("text", "")
         voice = request.get("voice", "bf_lily")
-        speed = request.get("speed", "1.0")
+        speed_raw = request.get("speed", "1.0")
         lang_code = request.get("lang_code", "b")
+        import math
+        import re
+        if not isinstance(text, str) or not isinstance(voice, str) \
+                or not isinstance(lang_code, str) \
+                or not re.fullmatch(r"[a-z0-9_]{1,32}", voice) \
+                or not re.fullmatch(r"[a-z]", lang_code):
+            log("request rejected: invalid fields")
+            send({"status": "error", "message": "invalid request fields"})
+            return
+        try:
+            speed = float(speed_raw)
+        except (TypeError, ValueError):
+            speed = None
+        if speed is None or not math.isfinite(speed) or not 0.25 <= speed <= 4.0:
+            log("request rejected: invalid speed")
+            send({"status": "error", "message": "invalid speed"})
+            return
 
         log(f"request: text_len={len(text)} voice={voice} speed={speed} lang={lang_code}")
 
@@ -269,15 +305,19 @@ def handle_client(conn):
                 cancel_check=lambda: _client_gone(conn),
             )
 
+        # Size before send: once the response is out, the client owns the
+        # temp dir and may delete it before we could stat it.
+        audio_bytes = os.path.getsize(audio_file)
         send({"status": "ok", "audio_file": audio_file})
-        log(f"response: ok bytes={os.path.getsize(audio_file)}")
+        log(f"response: ok bytes={audio_bytes}")
 
     except CancelledError:
         log("generation cancelled (client disconnected)")
     except Exception as e:
-        # Content-free: exception type + message may describe internals but
-        # never echoes request text (model errors reference voices/shapes).
-        log(f"error: {type(e).__name__}: {e}")
+        # Content-free (P-5): log the type only — exception MESSAGES from
+        # the model stack can embed request text fragments. The full message
+        # still goes to the client, which already holds the text.
+        log(f"error: {type(e).__name__}")
         send({"status": "error", "message": f"{type(e).__name__}: {e}"})
     finally:
         try:
@@ -377,6 +417,9 @@ def main():
     # (Swift clients read this file; the daemon is the single writer).
     token_path = os.path.join(DATA_DIR, "daemon.token")
     fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # O_CREAT's mode only applies on create — repair a pre-existing file's
+    # permissions so a once-loose token file can't stay world-readable.
+    os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(AUTH_TOKEN)
 
@@ -413,7 +456,12 @@ def main():
     finally:
         os.umask(umask_prev)
     os.chmod(SOCKET_PATH, 0o600)
-    server_socket.listen(2)
+    # Backlog must exceed the client's max in-flight chunks (SynthesisPipeline
+    # opens one connection per concurrent chunk). listen(2) refused the 3rd of
+    # 3 concurrent connections with ECONNREFUSED, which cascaded into a failed
+    # read ("Local voice unavailable"). Generation is still serialized by
+    # generation_lock; the backlog only governs how many connects can queue.
+    server_socket.listen(16)
     server_socket.settimeout(5)
 
     mode_str = "managed" if managed_mode else f"idle timeout {IDLE_TIMEOUT}s"
