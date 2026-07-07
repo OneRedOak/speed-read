@@ -263,8 +263,12 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section("Hotkeys") {
-                KeyboardShortcuts.Recorder("Speak / Stop:", name: .speakOrStop)
-                KeyboardShortcuts.Recorder("Pause / Resume:", name: .pauseResume)
+                LabeledContent("Speak / Stop:") {
+                    ShortcutRecorderField(name: .speakOrStop)
+                }
+                LabeledContent("Pause / Resume:") {
+                    ShortcutRecorderField(name: .pauseResume)
+                }
                 Button("Reset Shortcuts to Defaults") {
                     state.resetShortcutsToDefaults()
                 }
