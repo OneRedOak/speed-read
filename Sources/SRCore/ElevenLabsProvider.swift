@@ -55,6 +55,11 @@ public struct ElevenLabsProvider: TTSProvider {
     }
 
     public func synthesize(text: String, voiceID: String, settings: VoiceSettings) async throws -> SynthesisResult {
+        // Test seam for T-7 (fallback verification): behave exactly like a
+        // quota-exhausted account without touching the network.
+        if ProcessInfo.processInfo.environment["SR_SIMULATE_CLOUD_FAILURE"] == "1" {
+            throw TTSError.http(status: 429, body: nil)
+        }
         guard let key = KeychainStore.readAPIKey() else { throw TTSError.missingAPIKey }
 
         var components = URLComponents(

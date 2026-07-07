@@ -72,10 +72,19 @@ import Testing
     }
 }
 
-@Suite struct AudioCacheTests {
+@Suite final class AudioCacheTests {
+    private var tempDirs: [URL] = []
+
+    deinit {
+        for dir in tempDirs {
+            try? FileManager.default.removeItem(at: dir)
+        }
+    }
+
     private func freshCache() -> AudioCache {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sr-cache-test-\(UUID().uuidString)")
+        tempDirs.append(dir)
         return AudioCache(directory: dir, sizeCapBytes: 1000, ttl: 3600)
     }
 

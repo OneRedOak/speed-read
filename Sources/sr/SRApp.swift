@@ -12,7 +12,6 @@ final class SRAppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-@main
 struct SRApp: App {
     @NSApplicationDelegateAdaptor(SRAppDelegate.self) private var appDelegate
     @StateObject private var state = AppState()

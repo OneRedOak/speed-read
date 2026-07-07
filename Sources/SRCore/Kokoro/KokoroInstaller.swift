@@ -8,6 +8,14 @@ public struct KokoroInstaller: Sendable {
     // ── Supply-chain pins (P-12), resolved 2026-07-06 ──
     /// PyPI: latest mlx-audio at pin time.
     public static let mlxAudioVersion = "0.4.4"
+    /// Kokoro's English G2P is an *optional* mlx-audio dependency — without
+    /// it every generation throws ImportError. Pinned like mlx-audio (P-12).
+    public static let misakiVersion = "0.9.4"
+    /// misaki's G2P loads a spaCy model and tries to DOWNLOAD it at runtime
+    /// if absent (fails in pip-less uv venvs, and unpinned downloads violate
+    /// P-12) — so install the exact wheel up front.
+    public static let spacyModelWheel =
+        "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
     /// Python interpreter for the venv (uv downloads a standalone build
     /// if the system lacks it — deterministic across machines).
     public static let pythonVersion = "3.12"
@@ -115,12 +123,15 @@ public struct KokoroInstaller: Sendable {
         progress(.creatingVenv)
         try await run(uv, ["venv", "--python", Self.pythonVersion, paths.venvDir.path])
 
-        // 2. pinned mlx-audio (brings mlx, numpy, huggingface_hub, misaki...)
+        // 2. pinned mlx-audio + misaki (misaki is optional upstream but
+        // required for Kokoro English synthesis)
         progress(.installingPackages)
         try await run(uv, [
             "pip", "install",
             "--python", paths.venvPython.path,
             "mlx-audio==\(Self.mlxAudioVersion)",
+            "misaki[en]==\(Self.misakiVersion)",
+            Self.spacyModelWheel,
         ], timeout: 900)
 
         // 3. daemon script

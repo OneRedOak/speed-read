@@ -103,6 +103,15 @@ final class AppState: ObservableObject {
         Task.detached(priority: .utility) {
             AudioCache.shared.evictIfNeeded()
         }
+
+        // Pre-warm the local daemon when it can be needed (Auto fallback or
+        // Local mode), so cloud→local fallback is near-instant rather than
+        // paying a cold model load. Idle unload still reclaims the memory.
+        if backendMode != .cloud && KokoroRuntime.shared.isInstalled {
+            Task.detached(priority: .utility) {
+                try? await KokoroRuntime.shared.supervisor.ensureRunning()
+            }
+        }
     }
 
     func shutdown() {

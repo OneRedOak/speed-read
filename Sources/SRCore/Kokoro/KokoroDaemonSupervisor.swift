@@ -32,8 +32,11 @@ public actor KokoroDaemonSupervisor {
     /// Ensure a healthy daemon is running. Returns when the socket is
     /// connectable. Throws SupervisorError on failure.
     public func ensureRunning() async throws {
-        // Already healthy?
-        if process?.isRunning == true, Self.socketConnectable(paths.socketPath) {
+        // Already healthy? Accept a connectable socket even when we didn't
+        // spawn the daemon (another sr process — GUI vs CLI — owns it; the
+        // shared token file makes it usable, and the flock guard would make
+        // our own spawn exit immediately anyway).
+        if Self.socketConnectable(paths.socketPath) {
             if let since = healthySince, Date().timeIntervalSince(since) > 60 {
                 consecutiveFailures = 0  // stable — reset backoff
             }
@@ -42,27 +45,49 @@ public actor KokoroDaemonSupervisor {
         }
         healthySince = nil
 
+        // Actors are reentrant: while one caller awaits inside spawn(), a
+        // concurrent synthesize would re-enter here, see no socket, and
+        // spawn a second daemon over the first. Share one startup task.
+        if let inFlight = startupTask {
+            try await inFlight.value
+            return
+        }
+
         guard KokoroInstaller(paths: paths).isInstalled else {
             throw SupervisorError.notInstalled
         }
 
-        // Exponential backoff between spawn attempts.
-        if let last = lastSpawnAttempt {
-            let delay = min(pow(2.0, Double(consecutiveFailures)), 30.0)
-            let elapsed = Date().timeIntervalSince(last)
-            if consecutiveFailures > 0 && elapsed < delay {
-                try await Task.sleep(for: .seconds(delay - elapsed))
+        let task = Task { [self] in
+            // Exponential backoff between spawn attempts.
+            if let last = lastSpawnAttempt {
+                let delay = min(pow(2.0, Double(consecutiveFailures)), 30.0)
+                let elapsed = Date().timeIntervalSince(last)
+                if consecutiveFailures > 0 && elapsed < delay {
+                    try await Task.sleep(for: .seconds(delay - elapsed))
+                }
             }
+            try await spawn()
         }
-
-        try await spawn()
+        startupTask = task
+        defer { startupTask = nil }
+        try await task.value
     }
+
+    private var startupTask: Task<Void, Error>?
 
     private func spawn() async throws {
         stopProcess()
 
         lastSpawnAttempt = Date()
         token = Self.generateToken()
+
+        // Persist for other sr processes (0600, same trust domain as the
+        // socket). Written before launch so no request can race it.
+        try? FileManager.default.createDirectory(at: paths.base,
+                                                 withIntermediateDirectories: true)
+        try? Data(token.utf8).write(to: paths.tokenFile, options: .atomic)
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: paths.tokenFile.path)
 
         let p = Process()
         p.executableURL = paths.venvPython

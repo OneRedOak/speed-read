@@ -67,7 +67,16 @@ public struct KokoroProvider: TTSProvider {
             throw TTSError.network(underlying: "kokoro: daemon unavailable")
         }
 
-        let token = await runtime.supervisor.token
+        // Token file first: the live daemon may have been spawned by a
+        // different sr process (GUI vs CLI) whose supervisor wrote it.
+        let fileToken = (try? String(contentsOf: runtime.paths.tokenFile, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let token: String
+        if let fileToken, !fileToken.isEmpty {
+            token = fileToken
+        } else {
+            token = await runtime.supervisor.token
+        }
         let started = Date()
 
         // Daemon protocol: one JSON request line, one JSON response line.

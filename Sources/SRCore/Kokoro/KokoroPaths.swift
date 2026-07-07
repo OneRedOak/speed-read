@@ -25,6 +25,10 @@ public struct KokoroPaths: Sendable {
     public var venvPython: URL { venvDir.appendingPathComponent("bin/python3") }
     public var daemonScript: URL { base.appendingPathComponent("sr_tts_server.py") }
     public var socketPath: String { base.appendingPathComponent("daemon.sock").path }
+    /// Shared auth token (0600): written by whichever sr process spawns the
+    /// daemon, read by every sr process that talks to it. Same trust domain
+    /// as the 0600 socket; lets GUI + CLI instances share one daemon.
+    public var tokenFile: URL { base.appendingPathComponent("daemon.token") }
     public var manifest: URL { base.appendingPathComponent("manifest.json") }
     public var tmpRoot: URL { base.appendingPathComponent("tmp", isDirectory: true) }
 }

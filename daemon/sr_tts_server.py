@@ -107,6 +107,48 @@ class CancelledError(Exception):
     """Raised when a generation is cancelled (client disconnected)."""
 
 
+def _generate_segments(text, voice, speed, lang_code, cancel_check, depth=0):
+    """Yield audio segments, splitting the text on a known mlx-audio bug.
+
+    mlx-audio 0.4.4 raises ValueError('[broadcast_shapes] ...') for certain
+    voice x output-length combinations (upstream bug, fixed after 0.4.4 —
+    revisit when the pin is bumped). Splitting the text at a word boundary
+    changes the length and sidesteps the trigger; recursion is bounded.
+    """
+    import numpy as np
+
+    try:
+        segments = []
+        for result in model.generate(
+            text=text, voice=voice, speed=float(speed), lang_code=lang_code
+        ):
+            if cancel_check and cancel_check():
+                raise CancelledError("client disconnected")
+            # Materialize inside the try so the workaround also catches
+            # errors raised lazily during generation.
+            segments.append((np.array(result.audio), result.sample_rate))
+        return segments
+    except ValueError as e:
+        # Even ~35-char sentences can trigger the bug; split anything that
+        # still has a word boundary to split at.
+        if "broadcast_shapes" not in str(e) or depth >= 4 or len(text) < 12:
+            raise
+        mid = len(text) // 2
+        split_at = text.rfind(" ", 0, mid)
+        if split_at <= 0:
+            split_at = text.find(" ", mid)
+        if split_at <= 0:
+            raise
+        log(f"broadcast_shapes workaround: splitting text_len={len(text)} at {split_at}")
+        left = _generate_segments(
+            text[:split_at].strip(), voice, speed, lang_code, cancel_check, depth + 1
+        )
+        right = _generate_segments(
+            text[split_at:].strip(), voice, speed, lang_code, cancel_check, depth + 1
+        )
+        return left + right
+
+
 def generate_audio(text, voice, speed, lang_code, cancel_check=None):
     """Generate a WAV file from text. Returns the file path.
 
@@ -121,20 +163,9 @@ def generate_audio(text, voice, speed, lang_code, cancel_check=None):
     out_path = os.path.join(tmp_dir, "out.wav")
 
     try:
-        results = model.generate(
-            text=text,
-            voice=voice,
-            speed=float(speed),
-            lang_code=lang_code,
-        )
-
-        segments = []
-        sample_rate = None
-        for result in results:
-            if cancel_check and cancel_check():
-                raise CancelledError("client disconnected")
-            segments.append(np.array(result.audio))
-            sample_rate = result.sample_rate
+        pairs = _generate_segments(text, voice, speed, lang_code, cancel_check)
+        segments = [audio for audio, _ in pairs]
+        sample_rate = pairs[-1][1] if pairs else None
 
         if not segments or sample_rate is None:
             raise RuntimeError("model produced no audio")
