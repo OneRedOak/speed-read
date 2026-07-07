@@ -27,13 +27,21 @@ struct SRApp: App {
                   ? "waveform.circle.fill" : "waveform")
         }
         .menuBarExtraStyle(.window)
+
+        // Real window: unlike the MenuBarExtra panel it becomes key, so the
+        // shortcut recorders and the API-key field actually receive input.
+        Settings {
+            SettingsView()
+                .environmentObject(state)
+        }
     }
 }
 
+// MARK: - Menu panel (quick controls only; text input lives in Settings)
+
 struct MenuView: View {
     @EnvironmentObject var state: AppState
-    @State private var showingAPIKeyEntry = false
-    @State private var apiKeyDraft = ""
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -46,13 +54,15 @@ struct MenuView: View {
             Divider()
             privacySection
             statusSection
-            actionsSection
+            Divider()
+            bottomRow
         }
-        .padding(12)
-        .frame(width: 320)
+        .padding(14)
+        .frame(width: 320, alignment: .leading)
+        .onAppear { state.refreshVoices() }
     }
 
-    // MARK: - Transport (F-7 subset)
+    // MARK: Transport (F-7 subset)
 
     private var transportRow: some View {
         HStack(spacing: 14) {
@@ -91,18 +101,20 @@ struct MenuView: View {
             switch state.playback.state {
             case .playing(let s, let n):
                 Text("Sentence \(s + 1) of \(n)")
-                    .font(.caption).foregroundStyle(.secondary)
             case .paused(let s, let n):
                 Text("Paused — sentence \(s + 1) of \(n)")
-                    .font(.caption).foregroundStyle(.secondary)
             case .idle:
-                Text("Select text, press ⌥⇧/")
-                    .font(.caption).foregroundStyle(.secondary)
+                Text("Select text, press \(shortcutHint)")
             }
         }
+        .font(.caption).foregroundStyle(.secondary)
     }
 
-    // MARK: - Speed (F-8)
+    private var shortcutHint: String {
+        KeyboardShortcuts.getShortcut(for: .speakOrStop)?.description ?? "the hotkey (unset)"
+    }
+
+    // MARK: Speed (F-8)
 
     private var speedRow: some View {
         HStack {
@@ -115,28 +127,38 @@ struct MenuView: View {
         }
     }
 
-    // MARK: - Backend & voices (F-3, P-8 Local-Only)
+    // MARK: Backend & voices (F-3, P-8 Local-Only)
 
     private var backendPicker: some View {
-        Picker(selection: $state.backendMode) {
-            Text("Auto (cloud → local)").tag(SettingsStore.BackendMode.auto)
-            Text("Cloud only").tag(SettingsStore.BackendMode.cloud)
-            Text("Local only 🔒").tag(SettingsStore.BackendMode.local)
-        } label: {
-            Text("Backend")
+        VStack(alignment: .leading, spacing: 3) {
+            Picker("Backend", selection: $state.backendMode) {
+                Text("Auto").tag(SettingsStore.BackendMode.auto)
+                Text("Cloud").tag(SettingsStore.BackendMode.cloud)
+                Text("Local 🔒").tag(SettingsStore.BackendMode.local)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            Text(backendCaption)
+                .font(.caption2).foregroundStyle(.tertiary)
         }
-        .pickerStyle(.segmented)
-        .help("Local only guarantees no text ever leaves this Mac")
+    }
+
+    private var backendCaption: String {
+        switch state.backendMode {
+        case .auto: return "Cloud voices, local fallback if the cloud fails"
+        case .cloud: return "ElevenLabs only"
+        case .local: return "Nothing ever leaves this Mac"
+        }
     }
 
     @ViewBuilder
     private var voicePickers: some View {
         if state.backendMode != .local {
             Picker("Voice", selection: $state.voiceID) {
-                ForEach(ElevenLabsProvider.presetVoices) { voice in
+                ForEach(state.availableVoices) { voice in
                     Text(voice.name).tag(voice.id)
                 }
-                if !ElevenLabsProvider.presetVoices.contains(where: { $0.id == state.voiceID }) {
+                if !state.availableVoices.contains(where: { $0.id == state.voiceID }) {
                     Text("Custom (\(String(state.voiceID.prefix(8)))…)").tag(state.voiceID)
                 }
             }
@@ -155,15 +177,15 @@ struct MenuView: View {
         }
     }
 
-    // MARK: - Privacy & cost (P-6, P-10, C-1/C-2)
+    // MARK: Privacy & status (P-6, P-10, C-1/C-2)
 
     private var privacySection: some View {
         VStack(alignment: .leading, spacing: 6) {
             Toggle("Auto-delete ElevenLabs history", isOn: $state.autoDeleteHistory)
                 .toggleStyle(.checkbox)
-                .help("Best-effort: deletes each generation from your account right after synthesis")
-            Toggle("Cache audio (disable for sensitive sessions)", isOn: $state.cacheEnabled)
+            Toggle("Cache audio", isOn: $state.cacheEnabled)
                 .toggleStyle(.checkbox)
+                .help("Disable for sensitive sessions — nothing is written to disk")
             if !state.historyStatus.isEmpty {
                 Text(state.historyStatus)
                     .font(.caption).foregroundStyle(.secondary)
@@ -192,7 +214,14 @@ struct MenuView: View {
                 Text(installStatus).font(.caption).foregroundStyle(.secondary)
             }
         }
-        HStack {
+        if !state.kokoroInstalled && state.kokoroInstallStatus == nil {
+            Button("Install Local Voice (Kokoro, ~330 MB)…") {
+                state.installKokoro()
+            }
+            .buttonStyle(.borderless)
+            .font(.callout)
+        }
+        HStack(spacing: 4) {
             if let remaining = state.creditsRemaining, let limit = state.creditsLimit {
                 Text("Credits: \(remaining.formatted()) / \(limit.formatted())")
             }
@@ -204,60 +233,89 @@ struct MenuView: View {
         .font(.caption).foregroundStyle(.secondary)
     }
 
-    private var actionsSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if showingAPIKeyEntry {
-                HStack {
-                    SecureField(
-                        KeychainStore.maskedAPIKey() ?? "ElevenLabs API key",
-                        text: $apiKeyDraft
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    Button("Save") {
-                        let trimmed = apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !trimmed.isEmpty {
-                            KeychainStore.saveAPIKey(trimmed)
-                            state.refreshCredits()
-                        }
-                        apiKeyDraft = ""
-                        showingAPIKeyEntry = false
-                    }
-                }
-            } else {
-                Button(KeychainStore.readAPIKey() == nil
-                       ? "Add ElevenLabs API Key…"
-                       : "Change API Key…") {
-                    showingAPIKeyEntry = true
-                }
-                .buttonStyle(.borderless)
+    private var bottomRow: some View {
+        HStack {
+            Button("Settings…") {
+                NSApp.activate(ignoringOtherApps: true)
+                openSettings()
             }
-
-            if !state.kokoroInstalled && state.kokoroInstallStatus == nil {
-                Button("Install Local Voice (Kokoro, ~330 MB)…") {
-                    state.installKokoro()
-                }
-                .buttonStyle(.borderless)
-            }
-
-            Button("Purge Audio Cache") {
-                state.purgeCache()
-            }
-            .buttonStyle(.borderless)
-
-            HStack {
-                KeyboardShortcuts.Recorder("Speak/Stop:", name: .speakOrStop)
-                    .font(.caption)
-            }
-            HStack {
-                KeyboardShortcuts.Recorder("Pause/Resume:", name: .pauseResume)
-                    .font(.caption)
-            }
-
-            Divider()
+            Spacer()
             Button("Quit sr") {
                 NSApplication.shared.terminate(nil)
             }
-            .buttonStyle(.borderless)
         }
+        .buttonStyle(.borderless)
+    }
+}
+
+// MARK: - Settings window
+
+struct SettingsView: View {
+    @EnvironmentObject var state: AppState
+    @State private var apiKeyDraft = ""
+    @State private var apiKeySavedFlash = false
+
+    var body: some View {
+        Form {
+            Section("Hotkeys") {
+                KeyboardShortcuts.Recorder("Speak / Stop:", name: .speakOrStop)
+                KeyboardShortcuts.Recorder("Pause / Resume:", name: .pauseResume)
+                Button("Reset Shortcuts to Defaults") {
+                    state.resetShortcutsToDefaults()
+                }
+            }
+
+            Section("ElevenLabs") {
+                HStack {
+                    SecureField(
+                        KeychainStore.maskedAPIKey() ?? "API key",
+                        text: $apiKeyDraft
+                    )
+                    Button("Save") {
+                        let trimmed = apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !trimmed.isEmpty else { return }
+                        KeychainStore.saveAPIKey(trimmed)
+                        apiKeyDraft = ""
+                        apiKeySavedFlash = true
+                        state.refreshCredits()
+                        state.refreshVoices(force: true)
+                        Task { @MainActor in
+                            try? await Task.sleep(for: .seconds(2))
+                            apiKeySavedFlash = false
+                        }
+                    }
+                }
+                if apiKeySavedFlash {
+                    Text("Saved to Keychain").font(.caption).foregroundStyle(.green)
+                }
+                Text("Stored only in the macOS Keychain. Scope the key to Text-to-Speech + User Read.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Cost") {
+                let ledger = state.ledger
+                LabeledContent("Daily budget") {
+                    TextField("characters", value: Binding(
+                        get: { ledger.dailyBudget },
+                        set: { ledger.dailyBudget = max(0, $0) }
+                    ), format: .number)
+                    .frame(width: 100)
+                }
+                LabeledContent("Confirm reads above") {
+                    TextField("characters", value: Binding(
+                        get: { ledger.largeReadThreshold },
+                        set: { ledger.largeReadThreshold = max(0, $0) }
+                    ), format: .number)
+                    .frame(width: 100)
+                }
+            }
+
+            Section("Maintenance") {
+                Button("Purge Audio Cache") { state.purgeCache() }
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 420)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }

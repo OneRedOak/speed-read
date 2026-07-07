@@ -29,6 +29,9 @@ final class AppState: ObservableObject {
     @Published var lastError: String?
     @Published var creditsRemaining: Int?
     @Published var creditsLimit: Int?
+    /// Account voice list (F-10); presets until the first fetch lands.
+    @Published var availableVoices: [Voice] = ElevenLabsProvider.presetVoices
+    private var voicesFetchedAt: Date?
     @Published var historyStatus: String = ""
     @Published var kokoroInstallStatus: String?
     @Published var kokoroInstalled = KokoroRuntime.shared.isInstalled
@@ -94,6 +97,7 @@ final class AppState: ObservableObject {
             promptForAccessibility()
         }
         refreshCredits()
+        refreshVoices()
 
         // Startup cache maintenance (TTL sweep + LRU).
         Task.detached(priority: .utility) {
@@ -399,6 +403,8 @@ final class AppState: ObservableObject {
             lastError = "No ElevenLabs API key — add one in Settings."
         case .http(401, _), .http(403, _):
             lastError = "ElevenLabs auth failed — check your API key."
+        case .http(402, _):
+            lastError = "This voice needs a paid ElevenLabs plan — pick another voice."
         case .http(429, _):
             lastError = "ElevenLabs quota exceeded."
         case .http(let status, _):
@@ -413,6 +419,24 @@ final class AppState: ObservableObject {
         flashStatus(lastError ?? "Error")
     }
 
+    // MARK: - Voices (F-10)
+
+    func refreshVoices(force: Bool = false) {
+        if !force, let at = voicesFetchedAt, Date().timeIntervalSince(at) < 3600 { return }
+        Task { [weak self] in
+            guard let self else { return }
+            guard let voices = try? await ElevenLabsProvider().voices(), !voices.isEmpty else { return }
+            self.availableVoices = voices
+            self.voicesFetchedAt = Date()
+            // If the selected voice isn't usable on this account (e.g. a
+            // library voice that 402s on free plans), fall back to the first.
+            if !voices.contains(where: { $0.id == self.voiceID }),
+               !ElevenLabsProvider.presetVoices.contains(where: { $0.id == self.voiceID }) {
+                self.voiceID = voices[0].id
+            }
+        }
+    }
+
     // MARK: - Credits (C-1)
 
     func refreshCredits() {
@@ -422,6 +446,12 @@ final class AppState: ObservableObject {
             self.creditsRemaining = sub.remaining
             self.creditsLimit = sub.characterLimit
         }
+    }
+
+    // MARK: - Shortcuts
+
+    func resetShortcutsToDefaults() {
+        KeyboardShortcuts.reset(.speakOrStop, .pauseResume)
     }
 
     // MARK: - Accessibility onboarding

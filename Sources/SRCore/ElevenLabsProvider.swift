@@ -18,15 +18,14 @@ public struct ElevenLabsProvider: TTSProvider {
         ("v3 — most expressive", "eleven_v3"),
     ]
 
-    /// Preset voices seeded from the reference repo (PRD §16.1).
+    /// Bootstrap fallback only — the picker fetches the account's real voice
+    /// list (F-10). The reference repo's wider preset list included library
+    /// voices that 402 on free plans ("paid_plan_required"); these three are
+    /// standard premade voices present on every account.
     public static let presetVoices: [Voice] = [
-        Voice(id: "pFZP5JQG7iQjIQuC4Bku", name: "Lily — British, raspy"),
-        Voice(id: "Xb7hH8MSUJpSbSDYk0k2", name: "Alice — British, confident"),
-        Voice(id: "21m00Tcm4TlvDq8ikWAM", name: "Rachel — calm"),
-        Voice(id: "pNInz6obpgDQGcFmaJgB", name: "Adam — deep"),
-        Voice(id: "AZnzlk1XvdvUeBnXmlld", name: "Domi — strong"),
-        Voice(id: "TxGEqnHWrfWFTfGW9XjX", name: "Josh — young, deep"),
-        Voice(id: "yoZ06aMxZJJ28mfd3POQ", name: "Sam — raspy"),
+        Voice(id: "pFZP5JQG7iQjIQuC4Bku", name: "Lily — velvety actress"),
+        Voice(id: "Xb7hH8MSUJpSbSDYk0k2", name: "Alice — clear educator"),
+        Voice(id: "pNInz6obpgDQGcFmaJgB", name: "Adam — dominant, firm"),
     ]
 
     public var modelID: String
