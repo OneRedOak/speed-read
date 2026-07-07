@@ -26,8 +26,34 @@ sufficient — no Xcode needed).
 ```sh
 make app      # builds dist/sr.app
 make run      # builds + launches
+make install  # builds + copies to /Applications + launches
 make test     # unit + normalization parity tests
 ```
+
+## Running & restarting
+
+sr is a menu bar app (the waveform icon); it has no Dock icon. After
+quitting it ("Quit sr" at the bottom of the menu), restart it any of
+these ways:
+
+- **Spotlight / Launchpad** — if installed via `make install`, hit ⌘Space,
+  type "sr", return. This is the recommended setup.
+- **Finder** — double-click `/Applications/sr.app` (or `dist/sr.app` in
+  the repo if you haven't installed it).
+- **Terminal** — `open /Applications/sr.app`, or from the repo:
+  `open dist/sr.app` / `make run` (rebuilds first).
+
+Only run one copy at a time: if you use both the repo build and the
+/Applications copy, quit one before launching the other.
+
+Permissions (Accessibility) and the Keychain entry follow the app's
+signing identity, not its location — moving or rebuilding the app does
+not re-prompt.
+
+To start sr automatically at login: System Settings → General →
+Login Items & Extensions → "+" → select `/Applications/sr.app`. (A
+built-in "Launch at login" toggle via SMAppService is planned for
+Phase 3.)
 
 First launch prompts for **Accessibility** permission (needed for the
 global hotkey and reading the selection; sr reads the selection via the

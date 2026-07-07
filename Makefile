@@ -1,4 +1,4 @@
-.PHONY: build test app run clean
+.PHONY: build test app run install clean
 
 build:
 	swift build
@@ -19,6 +19,14 @@ app:
 
 run: app
 	open dist/sr.app
+
+# Install to /Applications. The Accessibility grant follows the signing
+# identity (bundle id + sr-dev cert), not the path, so it survives this.
+install: app
+	pkill -f 'sr.app/Contents/MacOS/sr' 2>/dev/null || true
+	rm -rf /Applications/sr.app
+	cp -R dist/sr.app /Applications/sr.app
+	open /Applications/sr.app
 
 clean:
 	rm -rf .build dist
