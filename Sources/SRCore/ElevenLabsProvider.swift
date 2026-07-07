@@ -103,6 +103,11 @@ public struct ElevenLabsProvider: TTSProvider {
             (data, response) = try await URLSession.shared.data(for: request)
         } catch is CancellationError {
             throw TTSError.cancelled
+        } catch let error as URLError where error.code == .cancelled {
+            // URLSession reports task cancellation as URLError, not Swift
+            // CancellationError — without this it's mislogged as a network
+            // failure (and would count as a fallback trigger).
+            throw TTSError.cancelled
         } catch {
             SRLog.error("elevenlabs.network", ["error": String(describing: type(of: error))])
             throw TTSError.network(underlying: error.localizedDescription)
@@ -165,17 +170,19 @@ public struct ElevenLabsProvider: TTSProvider {
     }
 
     /// Delete a generation from account history (P-6). Best-effort.
-    public func deleteHistoryItem(_ historyItemID: String) async -> Bool {
-        guard let key = KeychainStore.readAPIKey() else { return false }
+    /// Returns the HTTP status, or nil on network failure — callers need to
+    /// distinguish 404 (item not materialized yet, or already gone) from
+    /// transient failures.
+    public func deleteHistoryItem(_ historyItemID: String) async -> Int? {
+        guard let key = KeychainStore.readAPIKey() else { return nil }
         var request = URLRequest(
             url: URL(string: "https://api.elevenlabs.io/v1/history/\(historyItemID)")!)
         request.httpMethod = "DELETE"
         request.setValue(key, forHTTPHeaderField: "xi-api-key")
         request.timeoutInterval = 15
         guard let (_, response) = try? await URLSession.shared.data(for: request),
-              let http = response as? HTTPURLResponse else { return false }
-        let ok = http.statusCode == 200
+              let http = response as? HTTPURLResponse else { return nil }
         SRLog.event("history.delete", ["status": String(http.statusCode)])
-        return ok
+        return http.statusCode
     }
 }

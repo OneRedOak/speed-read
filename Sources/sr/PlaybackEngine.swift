@@ -71,6 +71,8 @@ final class PlaybackEngine: ObservableObject {
     /// though the stretching happens off the main thread.
     private var chain: Task<Void, Never> = Task {}
 
+    private var configObserver: NSObjectProtocol?
+
     init(rate: Double = 1.0, sentencePauseMS: Int = 400) {
         self.rate = rate
         self.sentencePauseMS = sentencePauseMS
@@ -78,6 +80,34 @@ final class PlaybackEngine: ObservableObject {
 
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: format)
+
+        // Output configuration changes (AirPods profile/sample-rate switch,
+        // device change) stop the engine and drop scheduled audio. Without
+        // this handler playback "skips": silence until the next segment
+        // schedule restarts the engine, losing everything queued in between.
+        // Recover by re-rendering from the last known position.
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine, queue: nil
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.handleConfigurationChange()
+            }
+        }
+    }
+
+    deinit {
+        if let observer = configObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    private func handleConfigurationChange() {
+        guard isActive else { return }
+        SRLog.event("playback.config_change", [:])
+        // The engine is stopped; playerTime is gone. pausedAtFrame tracks the
+        // last known position (updated 4×/s while playing), so resume there.
+        rescheduleContent(from: pausedAtFrame)
     }
 
     var isActive: Bool { state != .idle }
@@ -305,6 +335,11 @@ final class PlaybackEngine: ObservableObject {
         currentSeconds = Double(frame) / Self.sampleRate
         if let index = segmentIndex(containing: frame) {
             currentSentence = index
+        }
+        // Keep the fallback position fresh: it's the resume point after an
+        // engine configuration change, when playerTime is unavailable.
+        if state == .playing {
+            pausedAtFrame = frame
         }
     }
 

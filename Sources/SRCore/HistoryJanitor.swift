@@ -14,8 +14,21 @@ public actor HistoryJanitor {
         case failed(count: Int, at: Date)
     }
 
+    private struct PendingDelete {
+        let id: String
+        var attempts: Int
+        var notBefore: Date
+    }
+
+    /// Deleting immediately after synthesis races ElevenLabs' own history
+    /// materialization: too-early deletes 404 and the item appears LATER,
+    /// lingering forever. Wait before the first attempt, and re-try 404s on
+    /// a widening schedule before trusting that the item is really gone.
+    static let initialDelay: TimeInterval = 2.5
+    static let retryDelays: [TimeInterval] = [6, 20]
+
     private let provider = ElevenLabsProvider()
-    private var pending: [String] = []
+    private var pending: [PendingDelete] = []
     private var draining = false
     private var deletedTotal = 0
     private var failedTotal = 0
@@ -25,7 +38,10 @@ public actor HistoryJanitor {
 
     /// Queue a history item for deletion and drain asynchronously.
     public func enqueue(_ historyItemID: String) {
-        pending.append(historyItemID)
+        pending.append(PendingDelete(
+            id: historyItemID,
+            attempts: 0,
+            notBefore: Date().addingTimeInterval(Self.initialDelay)))
         drain()
     }
 
@@ -38,21 +54,38 @@ public actor HistoryJanitor {
     }
 
     private func processQueue() async {
-        while let id = pending.first {
-            pending.removeFirst()
-            var ok = await provider.deleteHistoryItem(id)
-            if !ok {
-                // One retry after a short pause (transient network hiccup).
-                try? await Task.sleep(for: .seconds(2))
-                ok = await provider.deleteHistoryItem(id)
+        while !pending.isEmpty {
+            // FIFO, but never before an item's notBefore time.
+            var item = pending.removeFirst()
+            let wait = item.notBefore.timeIntervalSinceNow
+            if wait > 0 {
+                try? await Task.sleep(for: .seconds(wait))
             }
-            if ok {
+
+            switch await provider.deleteHistoryItem(item.id) {
+            case 200:
                 deletedTotal += 1
                 lastStatus = .ok(count: deletedTotal, at: Date())
-            } else {
-                failedTotal += 1
-                lastStatus = .failed(count: failedTotal, at: Date())
-                SRLog.error("history.delete_failed", [:])
+            case 404 where item.attempts < Self.retryDelays.count:
+                item.notBefore = Date().addingTimeInterval(Self.retryDelays[item.attempts])
+                item.attempts += 1
+                pending.append(item)
+            case 404:
+                // Retried past the materialization window — genuinely gone
+                // (deleted by an earlier request, or never persisted).
+                deletedTotal += 1
+                lastStatus = .ok(count: deletedTotal, at: Date())
+            default:
+                // Transient (network / 5xx): one more try, then give up.
+                if item.attempts < Self.retryDelays.count {
+                    item.notBefore = Date().addingTimeInterval(Self.retryDelays[item.attempts])
+                    item.attempts += 1
+                    pending.append(item)
+                } else {
+                    failedTotal += 1
+                    lastStatus = .failed(count: failedTotal, at: Date())
+                    SRLog.error("history.delete_failed", [:])
+                }
             }
         }
         draining = false
