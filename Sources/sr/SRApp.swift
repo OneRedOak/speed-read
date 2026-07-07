@@ -65,20 +65,45 @@ struct MenuView: View {
     // MARK: Transport (F-7 subset)
 
     private var transportRow: some View {
-        HStack(spacing: 14) {
-            Button {
-                state.playback.togglePauseResume()
-            } label: {
-                Image(systemName: isPaused ? "play.fill" : "pause.fill")
-                    .imageScale(.large)
-            }
-            .disabled(!state.playback.isActive)
+        HStack(spacing: 12) {
+            Group {
+                Button {
+                    state.playback.restart()
+                } label: {
+                    Image(systemName: "backward.end.fill")
+                }
+                .help("Restart from the top")
 
-            Button {
-                state.stop()
-            } label: {
-                Image(systemName: "stop.fill")
-                    .imageScale(.large)
+                Button {
+                    state.playback.seek(by: -5)
+                } label: {
+                    Image(systemName: "gobackward.5")
+                        .imageScale(.large)
+                }
+                .help("Back 5 seconds")
+
+                Button {
+                    state.playback.togglePauseResume()
+                } label: {
+                    Image(systemName: isPaused ? "play.fill" : "pause.fill")
+                        .imageScale(.large)
+                }
+                .help(isPaused ? "Resume" : "Pause")
+
+                Button {
+                    state.playback.seek(by: 5)
+                } label: {
+                    Image(systemName: "goforward.5")
+                        .imageScale(.large)
+                }
+                .help("Forward 5 seconds")
+
+                Button {
+                    state.stop()
+                } label: {
+                    Image(systemName: "stop.fill")
+                }
+                .help("Stop")
             }
             .disabled(!state.playback.isActive)
 
@@ -91,23 +116,34 @@ struct MenuView: View {
         .buttonStyle(.borderless)
     }
 
-    private var isPaused: Bool {
-        if case .paused = state.playback.state { return true }
-        return false
-    }
+    private var isPaused: Bool { state.playback.state == .paused }
 
     private var progressRow: some View {
         Group {
-            switch state.playback.state {
-            case .playing(let s, let n):
-                Text("Sentence \(s + 1) of \(n)")
-            case .paused(let s, let n):
-                Text("Paused — sentence \(s + 1) of \(n)")
-            case .idle:
+            if state.playback.state == .idle {
                 Text("Select text, press \(shortcutHint)")
+            } else {
+                playbackProgressRow
             }
         }
         .font(.caption).foregroundStyle(.secondary)
+    }
+
+    private var playbackProgressRow: some View {
+        HStack(spacing: 6) {
+            if state.playback.state == .paused {
+                Text("Paused")
+            }
+            Text("Sentence \(state.playback.currentSentence + 1) of \(state.playback.totalSentences)")
+            Spacer()
+            Text("\(timeString(state.playback.currentSeconds)) / \(timeString(state.playback.availableSeconds))")
+                .monospacedDigit()
+        }
+    }
+
+    private func timeString(_ seconds: Double) -> String {
+        let total = Int(seconds.rounded())
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 
     private var shortcutHint: String {

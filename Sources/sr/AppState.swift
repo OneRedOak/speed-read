@@ -114,11 +114,11 @@ final class AppState: ObservableObject {
 
     // MARK: - Primary flows
 
+    /// Primary hotkey: always speak the current selection. If something is
+    /// already playing, the new read replaces it; an empty selection leaves
+    /// current playback untouched. (Q-5 revisited by user request — stopping
+    /// is the pause hotkey's and the menu's job.)
     func speakOrStop() {
-        if playback.isActive {
-            stop()
-            return
-        }
         // Routing is decided on the app that is frontmost at hotkey time (P-8).
         let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         let action = routing.action(for: bundleID)
@@ -157,6 +157,8 @@ final class AppState: ObservableObject {
             NSSound.beep()
             flashStatus("Concealed content skipped")
         case .empty:
+            // Leave any current playback running — a missed selection
+            // shouldn't kill the read in progress.
             NSSound.beep()
             flashStatus("No selection found")
         case .text(let raw, let method):
