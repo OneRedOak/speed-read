@@ -159,11 +159,12 @@ import Testing
         }
     }
 
-    private func freshCache() -> AudioCache {
+    private func freshCache(evictionDebounce: TimeInterval = 0.25) -> AudioCache {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sr-cache-test-\(UUID().uuidString)")
         tempDirs.append(dir)
-        return AudioCache(directory: dir, sizeCapBytes: 1000, ttl: 3600)
+        return AudioCache(directory: dir, sizeCapBytes: 1000, ttl: 3600,
+                          evictionDebounce: evictionDebounce)
     }
 
     @Test func keyIsStableAndCollisionResistant() {
@@ -182,15 +183,20 @@ import Testing
         #expect(a.count == 64)
     }
 
-    @Test func roundTripAndPurge() async throws {
+    @Test func storeIsImmediatelyVisible() {
         let cache = freshCache()
         let key = AudioCache.key(text: "t", provider: "p", voiceID: "v",
                                  modelID: "m", settings: VoiceSettings())
         #expect(cache.lookup(key) == nil)
         cache.store(key, data: Data([1, 2, 3]))
-        // store is async on a utility queue — give it a beat.
-        try await Task.sleep(for: .milliseconds(200))
         #expect(cache.lookup(key) == Data([1, 2, 3]))
+    }
+
+    @Test func roundTripAndPurge() async throws {
+        let cache = freshCache()
+        let key = AudioCache.key(text: "t", provider: "p", voiceID: "v",
+                                 modelID: "m", settings: VoiceSettings())
+        cache.store(key, data: Data([1, 2, 3]))
         cache.purge()
         try await Task.sleep(for: .milliseconds(200))
         #expect(cache.lookup(key) == nil)
@@ -205,5 +211,14 @@ import Testing
         try await Task.sleep(for: .milliseconds(200))
         cache.enabled = true
         #expect(cache.lookup(key) == nil)
+    }
+
+    @Test func burstStoresCoalesceEviction() async throws {
+        let cache = freshCache(evictionDebounce: 0.02)
+        for index in 0..<20 {
+            cache.store("key-\(index)", data: Data([UInt8(index)]))
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(cache.maintenancePassCount == 1)
     }
 }

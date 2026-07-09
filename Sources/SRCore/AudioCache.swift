@@ -34,15 +34,21 @@ public final class AudioCache: @unchecked Sendable {
 
     private let directory: URL
     private let queue = DispatchQueue(label: "com.patrickellis.sr.cache", qos: .utility)
+    private let evictionDebounce: TimeInterval
+    /// Accessed only on `queue`.
+    private var evictionWorkItem: DispatchWorkItem?
+    private var evictionPasses = 0
 
     public init(directory: URL? = nil,
                 sizeCapBytes: Int = 500_000_000,
-                ttl: TimeInterval = 30 * 24 * 3600) {
+                ttl: TimeInterval = 30 * 24 * 3600,
+                evictionDebounce: TimeInterval = 0.25) {
         self.directory = directory ?? FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("sr/cache", isDirectory: true)
         self._sizeCapBytes = sizeCapBytes
         self._ttl = ttl
+        self.evictionDebounce = evictionDebounce
         try? FileManager.default.createDirectory(at: self.directory,
                                                  withIntermediateDirectories: true)
     }
@@ -85,13 +91,13 @@ public final class AudioCache: @unchecked Sendable {
     public func store(_ key: String, data: Data) {
         guard enabled else { return }
         let file = url(for: key)
-        queue.async { [self] in
+        queue.sync { [self] in
             // Re-check: "no-cache" flipped after enqueue must stay a hard
             // boundary — a queued write landing post-toggle would put
             // sensitive audio on disk.
             guard enabled else { return }
             try? data.write(to: file, options: .atomic)
-            performEviction()
+            scheduleEviction()
         }
     }
 
@@ -120,10 +126,35 @@ public final class AudioCache: @unchecked Sendable {
     /// TTL sweep + LRU eviction down to the size cap. All maintenance runs
     /// on the cache queue so two evictions never race each other.
     public func evictIfNeeded() {
-        queue.async { [self] in performEviction() }
+        queue.async { [self] in
+            evictionWorkItem?.cancel()
+            evictionWorkItem = nil
+            performEviction()
+        }
+    }
+
+    /// Test seam for proving that bursty stores coalesce maintenance work.
+    var maintenancePassCount: Int {
+        queue.sync { evictionPasses }
+    }
+
+    /// Called on `queue`. A synthesis burst can store several chunks in a few
+    /// milliseconds; scanning the entire cache after each one turns writes
+    /// into O(chunks × cache entries). One trailing sweep has the same size
+    /// and TTL semantics with bounded delay.
+    private func scheduleEviction() {
+        guard evictionWorkItem == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.evictionWorkItem = nil
+            self.performEviction()
+        }
+        evictionWorkItem = work
+        queue.asyncAfter(deadline: .now() + evictionDebounce, execute: work)
     }
 
     private func performEviction() {
+        evictionPasses += 1
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(
             at: directory,
