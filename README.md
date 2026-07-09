@@ -11,8 +11,8 @@ sr is a privacy-first text-to-speech utility for macOS. It lives in your menu ba
 - **Instant, pitch-perfect speed** — 0.5×–3.0× applied client-side with time-domain (WSOLA) stretching. Changing speed never re-generates audio and never costs credits.
 - **Full transport** — play/pause, ±5 s seek, restart, stop, live progress, from the menu bar panel.
 - **Smart text cleanup** — PDF line-break repair, LaTeX math to spoken English, Markdown stripping, citations, units, URLs — ported from [Speak11](https://github.com/smcantab/speak11) and parity-tested.
-- **Cache-first** — repeated reads are instant and free (content-addressed local cache, size-capped, purgeable, disableable).
-- **Cost controls** — live credit display, exact per-read billing, daily budget with warning/hard-stop, large-read confirmation.
+- **Cache-first** — repeated reads are instant and free (content-addressed local cache, size-capped, purgeable, disableable, with burst writes coalesced into one maintenance sweep).
+- **Cost controls** — live credit display, exact per-read billing, daily budget with warning/hard-stop, large-read confirmation, and a 250,000-character per-read ceiling.
 - **Privacy by construction** — see [Privacy](#privacy).
 
 ## Requirements
@@ -34,7 +34,7 @@ Then, one-time setup:
 
 1. **Grant Accessibility** when prompted (System Settings → Privacy & Security → Accessibility → enable **sr**). This is what lets sr read your selection; the hotkey itself works without it.
 2. **Add your ElevenLabs key**: menu bar → waveform icon → Settings… → paste key → Save. It is stored only in the macOS Keychain. Recommended: create a dedicated key scoped to *Text-to-Speech + User Read*, and opt out of training under ElevenLabs → Terms & Privacy → Data Use.
-3. *(Optional, for offline use)* click **Install Local Voice (Kokoro, ~330 MB)** in the menu. Pinned, checksum-verified download.
+3. *(Optional, for offline use)* click **Install Local Voice (Kokoro, ~330 MB)** in the menu. The Python version and full dependency closure are pinned and hash-verified; the model revision and behavior-defining files are checksum-verified too.
 4. *(Optional)* System Settings → General → Login Items → **+** → `/Applications/sr.app` to start at login.
 
 ## Usage
@@ -53,13 +53,15 @@ CLI (same binary):
 ```sh
 /Applications/sr.app/Contents/MacOS/sr --speak article.md      # or "-" for stdin
 /Applications/sr.app/Contents/MacOS/sr --speak-clipboard --local
+# Explicitly bypass cloud budget/large-read gates for one invocation:
+/Applications/sr.app/Contents/MacOS/sr --speak article.md --override-cost-controls
 ```
 
 ## Privacy
 
 - **Keychain-only credentials** — the API key never touches a config file or environment variable; the UI shows at most its last 4 characters.
-- **Clipboard integrity** — the ⌘C fallback snapshots and restores your full clipboard (images, RTF, files) and verifies via change count.
-- **Concealed-content refusal** — anything a password manager marks concealed (`org.nspasteboard.ConcealedType`) is never spoken, cached, logged, or transmitted.
+- **Clipboard integrity** — the ⌘C fallback snapshots and restores your full clipboard (images, RTF, files), verifies ownership via change count, and restores again if a delayed copy arrives after timeout.
+- **Concealed-content refusal** — content marked protected through Accessibility or concealed through `org.nspasteboard.ConcealedType` is never spoken, cached, logged, or transmitted.
 - **Content-free logging** — logs record counts, latencies, and status codes. Never your text.
 - **Cloud history auto-delete** — every ElevenLabs generation is deleted from your account history seconds after synthesis (on by default; best-effort — see ElevenLabs' retention docs for backup windows).
 - **Per-app routing** — block sr in specific apps or force the local voice for sensitive ones (`~/Library/Application Support/sr/rules.json`); password managers are blocked out of the box.
@@ -71,7 +73,7 @@ CLI (same binary):
 | `huggingface.co` | Only during the explicit local-voice install |
 | `github.com` / PyPI | Only during the explicit local-voice install (pinned Python packages) |
 
-Local synthesis runs in a supervised daemon bound to a Unix socket (0600) with per-launch auth — no network listener, ever.
+Local synthesis runs in a supervised daemon bound to a Unix socket (0600) with per-launch auth, bounded pre-auth connections, request-size limits, verified-model-only startup, and parent/idle watchdogs — no network listener, ever.
 
 ## Uninstall
 
@@ -88,7 +90,7 @@ Then remove **sr** from System Settings → Privacy & Security → Accessibility
 
 ```sh
 make build     # debug build
-make test      # unit + normalization parity tests (Swift Testing)
+make test      # core + app CLI + daemon unit tests and normalization parity
 make app       # release build → dist/sr.app (locally signed)
 make run       # build + launch from dist/
 ```
@@ -98,7 +100,7 @@ Two toolchain notes:
 - **Signing / Accessibility across rebuilds**: without a codesigning identity, builds are ad-hoc signed and macOS forgets the Accessibility grant after every rebuild. Create a self-signed code-signing certificate named `sr-dev` (Keychain Access → Certificate Assistant → Create a Certificate… → type *Code Signing*) and `build-app.sh` picks it up automatically, making the grant stick.
 - **`make test` targets a Command-Line-Tools-only toolchain** (it wires the Swift Testing framework paths manually). With full Xcode installed, plain `swift test` should also work.
 
-Layout: `Sources/SRCore` (engine: normalizer, providers, cache, cost, privacy — fully testable), `Sources/sr` (menu bar app, playback, capture, CLI), `daemon/` (local TTS daemon), `Tests/` (parity fixtures + unit tests). `PROGRESS.md` tracks the build log and roadmap (Shortcuts, MCP server, URL scheme, notarized releases).
+Layout: `Sources/SRCore` (engine: normalizer, providers, cache, cost, privacy), `Sources/sr` (menu bar app, playback, capture, CLI), `daemon/` (local TTS daemon plus its hashed dependency lock), `Tests/` (core, app CLI, daemon, and parity tests). `PROGRESS.md` tracks the build log and roadmap (Shortcuts, MCP server, URL scheme, notarized releases).
 
 ## Credits
 

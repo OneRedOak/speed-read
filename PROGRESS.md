@@ -42,7 +42,7 @@ PRD: see conversation / repo root. Reference implementation: [Speak11](https://g
 - [x] Phase 0 spike B — live verification complete: header present, delete works, history empty after delete.
 - [x] Phase 1 code — F-1, F-2, F-3 (ElevenLabs only), F-4 (30/30 parity fixtures), F-5, F-6 minimal, F-8, P-1, P-2, P-3, P-4 (refusal in capture path), P-5, P-11. `dist/sr.app` builds + launches.
 - [ ] Phase 1 acceptance — end-to-end speak blocked on: user grants Accessibility to sr.app; user adds ElevenLabs key to Keychain. Then: T-1 capture matrix spot-check, T-2 clipboard integrity, live spike B (history-item-id header).
-- [x] Phase 2 code — P-6 HistoryJanitor (on by default; leftover Phase-1 history manually purged, account history verified empty), P-8 routing rules (`rules.json`, password managers blocked) + Local-Only backend mode, P-9 Kokoro daemon (Unix socket + per-launch token), P-10 cache (SHA-256 keys, 500 MB LRU, 30-day TTL, purge + no-cache toggle), P-12 pins (mlx-audio==0.4.4, model rev a71e4d38…, weights SHA-256 recorded), F-3 Kokoro provider + Auto cloud→local fallback (one-way, never local→cloud), F-9 cache-first, C-1 credits + spent-today (exact `character-cost` header), C-2 daily budget 30k w/ 80% warn + hard stop + override, C-3 large-read confirm ≥8k chars. 30 tests green.
+- [x] Phase 2 code — P-6 HistoryJanitor (on by default; leftover Phase-1 history manually purged, account history verified empty), P-8 routing rules (`rules.json`, password managers blocked) + Local-Only backend mode, P-9 Kokoro daemon (Unix socket + per-launch token), P-10 cache (SHA-256 keys, 500 MB LRU, 30-day TTL, purge + no-cache toggle), P-12 pins (exact Python, fully hashed dependency lock, model rev a71e4d38…, weights SHA-256 recorded), F-3 Kokoro provider + Auto cloud→local fallback (one-way, never local→cloud), F-9 cache-first, C-1 credits + spent-today (exact `character-cost` header), C-2 daily budget 30k w/ 80% warn + hard stop + override, C-3 large-read confirm ≥8k chars. 51 Swift tests + 2 daemon tests green.
 - [x] Phase 2 acceptance (2026-07-06):
   - **T-3 concealed refusal ✓** — pasteboard item with `org.nspasteboard.ConcealedType` refused (`CONCEALED-REFUSED`, exit 2); sentinel absent from logs/App Support/prefs.
   - **T-6 privacy sweep ✓** — sentinel phrases spoken through the full cloud pipeline: zero hits in logs, Application Support, UserDefaults; cache filenames are hashes; no lingering temp audio; ElevenLabs history empty immediately after (janitor). Network observation: endpoint-level external verification is best done with a local proxy or Little Snitch; sr's own logs show only elevenlabs events.
@@ -56,16 +56,13 @@ PRD: see conversation / repo root. Reference implementation: [Speak11](https://g
 
 Fixed in that pass: daemon request validation + size caps + token-perms repair, runtime model-load pinning (SR_MODEL_PATH from the verified manifest), pipeline error-swallow hang, stale-delivery race, concurrent-capture clipboard clobber, CostLedger atomicity, CLI usage handling, playback engine lifecycle (rate-before-first-chunk, finish-across-pause, orphaned stretch chain, engine idle stop), log O_APPEND + rotate-by-rename, Chunker O(n²) offsets, ElevenLabs URL encoding. Full audit trail: `.review-and-push/triage-20260707-full-repo.md` (untracked).
 
-Deliberately deferred:
+Resolved in the 2026-07-09 audit-fix pass:
 
-- **Supply-chain hashes**: only top-level Python pins; transitive deps + spaCy wheel unverified. Fix = `uv pip compile --generate-hashes` lockfile installed with `--require-hashes` (needs online resolution; changes installer flow).
-- **Playback position drift under buffer underrun**: player sampleTime counts starvation silence as consumed content, so a seek after a long stall can skip audio. Fix is a per-buffer accounting rework of PlaybackEngine position math.
-- **Decode-failure policy**: a corrupt chunk becomes a silent 1-frame skip (logged, not surfaced). Decide: fail the read loudly vs. skip with a status flash. Related: cloud audio accepted on HTTP 200 alone (no magic-byte sniff).
-- **AX-path concealed content**: the P-4 refusal covers pasteboard types only; `kAXSelectedTextAttribute` from an app not in the routing blocklist bypasses it. Password-manager blocklist is static + allow-on-unknown.
-- **Budget is preflight-only**: chunks already in flight keep billing after the daily cap trips mid-read; no global input-size cap.
-- **Daemon connection cap**: unlimited concurrent pre-auth connections (thread each, 10 s timeout); request-size cap added, connection cap not.
-- **CI**: no workflow proves a clean clone builds on a stranger's machine (macos-14 `swift build` would).
-- **⌘C fallback late-copy edge**: a copy landing after the 0.6 s poll timeout + restore leaves the selection on the clipboard.
+- **Supply chain**: the installer now uses an exact Python version and a fully resolved, hash-locked dependency closure; the bundled lock is checksummed before `uv --require-hashes` runs and recorded in the validated install manifest.
+- **Playback correctness and memory**: underruns pause the content clock; completion waits for decode, render, and scheduled-buffer work; decode failures stop visibly; cloud/local payloads are magic-byte checked; encoded chunks replace an unbounded PCM timeline and decode/render work runs off the main actor.
+- **Privacy and cost boundaries**: AX protected-content refusal, source-aware routing, Local-mode cloud cancellation, late-copy clipboard recovery, bounded 250,000-character reads, and concurrent per-chunk cloud budget reservations now fail closed.
+- **Daemon hardening**: verified-manifest-only model startup, symlink repair, bounded connections, pre-generation disconnect checks, safe socket writes, content-free wire errors, parent/idle watchdogs, and generation-scoped MLX cleanup.
+- **Lifecycle, performance, and verification**: shutdown awaits history cleanup and daemon/install tasks; Keychain and installer failures are surfaced; synthesis uses single-flight cache misses; cache maintenance is debounced; app CLI and daemon tests were added; strict-concurrency builds are warning-free; macOS CI runs tests/build/syntax checks and validates the dependency lock.
 
 ## Deviations from PRD
 

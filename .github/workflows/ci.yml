@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      # actions/checkout v4.2.2, pinned so CI does not execute a mutable tag.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Show toolchain
+        run: swift --version
+
+      - name: Verify local-runtime lock integrity
+        run: |
+          lock_hash="$(shasum -a 256 daemon/requirements.lock | cut -d ' ' -f 1)"
+          grep -q "$lock_hash" Sources/SRCore/Kokoro/KokoroInstaller.swift
+
+      - name: Test
+        run: make test
+
+      - name: Build
+        run: make build
+
+      - name: Check packaging and daemon syntax
+        run: |
+          bash -n scripts/build-app.sh
+          python3 -m py_compile daemon/sr_tts_server.py
