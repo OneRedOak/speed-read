@@ -75,6 +75,7 @@ final class AppState: ObservableObject {
     }
 
     private var statusClearTask: Task<Void, Never>?
+    private var installTask: Task<Void, Never>?
     private var cancellables: Set<AnyCancellable> = []
     /// Serializes selection captures: two concurrent ⌘C fallbacks snapshot/
     /// restore each other's transient pasteboard state and can permanently
@@ -118,10 +119,10 @@ final class AppState: ObservableObject {
         // Resume history deletions that were pending when the app last quit.
         if let ids = UserDefaults.standard.stringArray(forKey: Self.pendingDeletesKey),
            !ids.isEmpty {
-            UserDefaults.standard.removeObject(forKey: Self.pendingDeletesKey)
             let janitor = janitor
             Task {
                 for id in ids { await janitor.enqueue(id) }
+                UserDefaults.standard.removeObject(forKey: Self.pendingDeletesKey)
             }
         }
 
@@ -148,23 +149,21 @@ final class AppState: ObservableObject {
 
     private nonisolated static let pendingDeletesKey = "pendingHistoryDeletes"
 
-    func shutdown() {
+    func shutdown() async {
         stop()
+        installTask?.cancel()
+        await installTask?.value
+        installTask = nil
         // Persist not-yet-completed history deletions across quits (IDs are
         // opaque provider tokens — content-free). Re-enqueued at next launch.
-        let janitor = janitor
-        Task.detached {
-            let ids = await janitor.pendingIDs
-            if ids.isEmpty {
-                UserDefaults.standard.removeObject(forKey: Self.pendingDeletesKey)
-            } else {
-                UserDefaults.standard.set(ids, forKey: Self.pendingDeletesKey)
-            }
+        let ids = await janitor.pendingIDs
+        if ids.isEmpty {
+            UserDefaults.standard.removeObject(forKey: Self.pendingDeletesKey)
+        } else {
+            UserDefaults.standard.set(ids, forKey: Self.pendingDeletesKey)
         }
-        Task { await KokoroRuntime.shared.supervisor.stop() }
-        // Give the SIGTERM + persistence tasks a moment; the daemon's parent
-        // watchdog is the backstop.
-        usleep(300_000)
+        UserDefaults.standard.synchronize()
+        await KokoroRuntime.shared.supervisor.stop()
     }
 
     // MARK: - Primary flows
@@ -450,7 +449,8 @@ final class AppState: ObservableObject {
         kokoroInstallStatus = "Starting…"
         // Strong capture: install must outlive any UI churn, and AppState
         // lives for the app's lifetime.
-        Task { [self] in
+        installTask = Task { [self] in
+            defer { installTask = nil }
             for await progress in KokoroRuntime.shared.installer.install(daemonSourceURL: source) {
                 switch progress {
                 case .creatingVenv: kokoroInstallStatus = "Creating Python environment…"

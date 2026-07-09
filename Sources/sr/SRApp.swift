@@ -2,13 +2,19 @@ import KeyboardShortcuts
 import SRCore
 import SwiftUI
 
+@MainActor
 final class SRAppDelegate: NSObject, NSApplicationDelegate {
     static weak var state: AppState?
+    private var terminationPending = false
 
-    func applicationWillTerminate(_ notification: Notification) {
-        MainActor.assumeIsolated {
-            SRAppDelegate.state?.shutdown()
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !terminationPending else { return .terminateLater }
+        terminationPending = true
+        Task {
+            await SRAppDelegate.state?.shutdown()
+            sender.reply(toApplicationShouldTerminate: true)
         }
+        return .terminateLater
     }
 }
 
@@ -464,6 +470,7 @@ struct SettingsView: View {
     @EnvironmentObject var state: AppState
     @State private var apiKeyDraft = ""
     @State private var apiKeySavedFlash = false
+    @State private var apiKeySaveError: String?
 
     var body: some View {
         Form {
@@ -488,9 +495,14 @@ struct SettingsView: View {
                     Button("Save") {
                         let trimmed = apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !trimmed.isEmpty else { return }
-                        KeychainStore.saveAPIKey(trimmed)
+                        guard KeychainStore.saveAPIKey(trimmed) else {
+                            apiKeySavedFlash = false
+                            apiKeySaveError = "Keychain rejected the update. Unlock your login keychain and try again."
+                            return
+                        }
                         apiKeyDraft = ""
                         apiKeySavedFlash = true
+                        apiKeySaveError = nil
                         state.refreshCredits()
                         state.refreshVoices(force: true)
                         Task { @MainActor in
@@ -501,6 +513,9 @@ struct SettingsView: View {
                 }
                 if apiKeySavedFlash {
                     Text("Saved to Keychain").font(.caption).foregroundStyle(.green)
+                }
+                if let apiKeySaveError {
+                    Text(apiKeySaveError).font(.caption).foregroundStyle(.red)
                 }
                 Text("Stored only in the macOS Keychain. Scope the key to Text-to-Speech + User Read.")
                     .font(.caption).foregroundStyle(.secondary)

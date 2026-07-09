@@ -27,21 +27,35 @@ public actor HistoryJanitor {
     static let initialDelay: TimeInterval = 2.5
     static let retryDelays: [TimeInterval] = [6, 20]
 
-    private let provider = ElevenLabsProvider()
+    private let initialDelay: TimeInterval
+    private let deleteHistoryItem: @Sendable (String) async -> Int?
     private var pending: [PendingDelete] = []
+    private var inFlight: PendingDelete?
     private var draining = false
     private var deletedTotal = 0
     private var failedTotal = 0
     public private(set) var lastStatus: LastStatus = .idle
 
-    public init() {}
+    public init() {
+        let provider = ElevenLabsProvider()
+        self.initialDelay = Self.initialDelay
+        self.deleteHistoryItem = { id in await provider.deleteHistoryItem(id) }
+    }
+
+    init(
+        initialDelay: TimeInterval,
+        deleteHistoryItem: @escaping @Sendable (String) async -> Int?
+    ) {
+        self.initialDelay = initialDelay
+        self.deleteHistoryItem = deleteHistoryItem
+    }
 
     /// Queue a history item for deletion and drain asynchronously.
     public func enqueue(_ historyItemID: String) {
         pending.append(PendingDelete(
             id: historyItemID,
             attempts: 0,
-            notBefore: Date().addingTimeInterval(Self.initialDelay)))
+            notBefore: Date().addingTimeInterval(initialDelay)))
         drain()
     }
 
@@ -57,12 +71,13 @@ public actor HistoryJanitor {
         while !pending.isEmpty {
             // FIFO, but never before an item's notBefore time.
             var item = pending.removeFirst()
+            inFlight = item
             let wait = item.notBefore.timeIntervalSinceNow
             if wait > 0 {
                 try? await Task.sleep(for: .seconds(wait))
             }
 
-            switch await provider.deleteHistoryItem(item.id) {
+            switch await deleteHistoryItem(item.id) {
             case 200:
                 deletedTotal += 1
                 lastStatus = .ok(count: deletedTotal, at: Date())
@@ -87,6 +102,7 @@ public actor HistoryJanitor {
                     SRLog.error("history.delete_failed", [:])
                 }
             }
+            inFlight = nil
         }
         draining = false
     }
@@ -106,7 +122,10 @@ public actor HistoryJanitor {
     /// IDs still awaiting deletion — persisted across app quits so pending
     /// deletes survive (IDs are opaque provider tokens, content-free).
     public var pendingIDs: [String] {
-        pending.map(\.id)
+        var ids = pending.map(\.id)
+        if let inFlight { ids.insert(inFlight.id, at: 0) }
+        var seen = Set<String>()
+        return ids.filter { seen.insert($0).inserted }
     }
 
     /// Human-readable status for the menu ("History: 12 deleted").

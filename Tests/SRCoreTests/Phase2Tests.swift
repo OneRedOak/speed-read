@@ -84,6 +84,19 @@ import Testing
     }
 }
 
+@Suite struct HistoryJanitorTests {
+    @Test func pendingSnapshotIncludesActiveDeletion() async throws {
+        let janitor = HistoryJanitor(initialDelay: 0) { _ in
+            try? await Task.sleep(for: .milliseconds(150))
+            return 200
+        }
+        await janitor.enqueue("history-1")
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(await janitor.pendingIDs == ["history-1"])
+        #expect(await janitor.waitUntilDrained(timeout: 1))
+    }
+}
+
 @Suite struct CostLedgerTests {
     private func freshLedger() -> CostLedger {
         let defaults = UserDefaults(suiteName: "sr-tests-\(UUID().uuidString)")!
