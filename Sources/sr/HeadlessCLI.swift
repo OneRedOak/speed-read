@@ -161,6 +161,10 @@ enum HeadlessCLI {
         }
         let settings = SettingsStore()
         let normalized = Normalizer.normalize(text)
+        guard normalized.count <= Chunker.maxReadCharacters else {
+            print("input too large (maximum \(Chunker.maxReadCharacters) characters)")
+            return 1
+        }
         let chunks = Chunker.split(normalized)
         guard !chunks.isEmpty else {
             print("nothing to speak")
@@ -240,6 +244,11 @@ enum HeadlessCLI {
 
             playback.startSession(totalSentences: chunks.count)
             playback.onFinished = { finish(0) }
+            playback.onError = { message in
+                print("PLAYBACK-FAILED: \(message)")
+                pipeline.cancel()
+                finish(3)
+            }
 
             pipeline.run(
                 chunks: chunks,

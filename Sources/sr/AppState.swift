@@ -84,6 +84,7 @@ final class AppState: ObservableObject {
     /// Bumped per speak(); stale pipeline deliveries (a chunk that slipped
     /// past cancellation) are dropped instead of feeding into the new session.
     private var speakGeneration = 0
+    private var preparationGeneration = 0
     private var activeUsesCloud = false
 
     init() {
@@ -210,6 +211,7 @@ final class AppState: ObservableObject {
     }
 
     func stop() {
+        preparationGeneration += 1
         pipeline.cancel()
         playback.stop()
         activeUsesCloud = false
@@ -278,10 +280,35 @@ final class AppState: ObservableObject {
     private func speak(_ raw: String,
                        captureMethod: SelectionCapture.Method,
                        routingAction: RoutingPolicy.Action) {
-        let normalized = Normalizer.normalize(raw)
-        let chunks = Chunker.split(normalized)
+        preparationGeneration += 1
+        let preparation = preparationGeneration
+        Task { @MainActor [weak self] in
+            let prepared = await Task.detached(priority: .userInitiated) {
+                let normalized = Normalizer.normalize(raw)
+                return (normalized, Chunker.split(normalized))
+            }.value
+            guard let self, self.preparationGeneration == preparation else { return }
+            self.beginPreparedSpeak(
+                normalized: prepared.0,
+                chunks: prepared.1,
+                captureMethod: captureMethod,
+                routingAction: routingAction)
+        }
+    }
+
+    private func beginPreparedSpeak(
+        normalized: String,
+        chunks: [Chunk],
+        captureMethod: SelectionCapture.Method,
+        routingAction: RoutingPolicy.Action
+    ) {
         guard !chunks.isEmpty else {
             flashStatus("Nothing to speak")
+            return
+        }
+        guard normalized.count <= Chunker.maxReadCharacters else {
+            lastError = "Selection is too large (maximum \(Chunker.maxReadCharacters.formatted()) characters)."
+            flashStatus(lastError!)
             return
         }
         guard var routes = resolveRoutes(routingAction: routingAction) else { return }
@@ -336,6 +363,14 @@ final class AppState: ObservableObject {
         activeUsesCloud = !routes.isLocal
         playback.onFinished = { [weak self] in
             self?.refreshCredits()
+        }
+        playback.onError = { [weak self] message in
+            guard let self else { return }
+            self.pipeline.cancel()
+            self.activeUsesCloud = false
+            self.lastError = message
+            self.flashStatus(message)
+            NSSound.beep()
         }
 
         let deleteHistory = autoDeleteHistory

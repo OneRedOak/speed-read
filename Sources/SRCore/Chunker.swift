@@ -19,6 +19,8 @@ public struct Chunk: Sendable, Identifiable {
 /// pay per-request overhead on 3-character chunks.
 public enum Chunker {
     public static let minChunkLength = 8
+    public static let maxChunkLength = 5_000
+    public static let maxReadCharacters = 250_000
 
     public static func split(_ text: String) -> [Chunk] {
         let tokenizer = NLTokenizer(unit: .sentence)
@@ -40,9 +42,13 @@ public enum Chunker {
             return true
         }
 
+        // Bound pathological sentences (minified text, giant URLs, OCR without
+        // punctuation) before they reach provider/request-size limits.
+        let bounded = raw.flatMap(splitLongPiece)
+
         // Merge fragments shorter than minChunkLength into the next sentence.
         var merged: [(text: String, offset: Int)] = []
-        for piece in raw {
+        for piece in bounded {
             if let last = merged.last, last.text.count < minChunkLength {
                 merged[merged.count - 1] = (last.text + " " + piece.text, last.offset)
             } else {
@@ -53,5 +59,40 @@ public enum Chunker {
         return merged.enumerated().map { index, piece in
             Chunk(id: index, text: piece.text, offset: piece.offset)
         }
+    }
+
+    private static func splitLongPiece(
+        _ piece: (text: String, offset: Int)
+    ) -> [(text: String, offset: Int)] {
+        guard piece.text.count > maxChunkLength else { return [piece] }
+
+        var result: [(text: String, offset: Int)] = []
+        var remainder = piece.text[...]
+        var consumed = 0
+
+        while remainder.count > maxChunkLength {
+            let hardEnd = remainder.index(remainder.startIndex, offsetBy: maxChunkLength)
+            let candidate = remainder[..<hardEnd]
+            let cut = candidate.lastIndex(where: { $0.isWhitespace }) ?? hardEnd
+            let rawPart = remainder[..<cut]
+            let part = rawPart.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !part.isEmpty {
+                let leading = rawPart.prefix(while: { $0.isWhitespace }).count
+                result.append((part, piece.offset + consumed + leading))
+            }
+
+            let cutDistance = remainder.distance(from: remainder.startIndex, to: cut)
+            remainder = remainder[cut...]
+            let whitespace = remainder.prefix(while: { $0.isWhitespace }).count
+            remainder = remainder.dropFirst(whitespace)
+            consumed += cutDistance + whitespace
+        }
+
+        let tail = remainder.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !tail.isEmpty {
+            let leading = remainder.prefix(while: { $0.isWhitespace }).count
+            result.append((tail, piece.offset + consumed + leading))
+        }
+        return result
     }
 }

@@ -29,4 +29,12 @@ import Testing
             #expect(text[start...].hasPrefix(chunk.text.prefix(5)))
         }
     }
+
+    @Test func splitsPathologicallyLongSentences() {
+        let input = String(repeating: "word ", count: 2_500)
+        let chunks = Chunker.split(input)
+        #expect(chunks.count > 1)
+        #expect(chunks.allSatisfy { $0.text.count <= Chunker.maxChunkLength })
+        #expect(chunks.map(\.offset) == chunks.map(\.offset).sorted())
+    }
 }

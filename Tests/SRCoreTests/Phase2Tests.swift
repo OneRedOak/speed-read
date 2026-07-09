@@ -97,6 +97,23 @@ import Testing
     }
 }
 
+@Suite struct PlaybackCompletionPolicyTests {
+    @Test func waitsForDecodeRenderAndScheduledWork() {
+        #expect(!PlaybackCompletionPolicy.canFinish(
+            totalSentences: 2, appendedSentences: 2,
+            pendingDecodes: 0, pendingRenders: 1, scheduledBuffers: 0))
+        #expect(!PlaybackCompletionPolicy.canFinish(
+            totalSentences: 2, appendedSentences: 2,
+            pendingDecodes: 1, pendingRenders: 0, scheduledBuffers: 0))
+        #expect(!PlaybackCompletionPolicy.canFinish(
+            totalSentences: 2, appendedSentences: 2,
+            pendingDecodes: 0, pendingRenders: 0, scheduledBuffers: 1))
+        #expect(PlaybackCompletionPolicy.canFinish(
+            totalSentences: 2, appendedSentences: 2,
+            pendingDecodes: 0, pendingRenders: 0, scheduledBuffers: 0))
+    }
+}
+
 @Suite struct CostLedgerTests {
     private func freshLedger() -> CostLedger {
         let defaults = UserDefaults(suiteName: "sr-tests-\(UUID().uuidString)")!
