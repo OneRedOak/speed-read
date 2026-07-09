@@ -190,25 +190,18 @@ enum SelectionCapture {
 
         // Poll for the pasteboard to change (apps take 20–300 ms to service ⌘C).
         var waited: TimeInterval = 0
-        while pasteboard.changeCount == baseline && waited < 0.6 {
+        // Some apps service the synthetic copy slowly. Wait through the full
+        // ownership window before restoring; once restored, we cannot safely
+        // distinguish a delayed synthetic copy from a real same-app copy.
+        while pasteboard.changeCount == baseline && waited < 0.9 {
             Thread.sleep(forTimeInterval: 0.02)
             waited += 0.02
         }
 
         guard pasteboard.changeCount != baseline else {
-            // Restore, then briefly watch for a copy response that arrived just
-            // after the polling deadline. Without this grace window the late
-            // selection replaces the user's clipboard after we return.
+            // Restore exactly once. Never infer ownership of a later change:
+            // the user may copy a different value in the same application.
             snapshot.restore(to: pasteboard)
-            let restoredCount = pasteboard.changeCount
-            var graceWait: TimeInterval = 0
-            while pasteboard.changeCount == restoredCount && graceWait < 0.3 {
-                Thread.sleep(forTimeInterval: 0.02)
-                graceWait += 0.02
-            }
-            if pasteboard.changeCount != restoredCount {
-                snapshot.restore(to: pasteboard)
-            }
             SRLog.event("capture.empty", ["method": "copy"])
             return .empty
         }

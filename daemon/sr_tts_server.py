@@ -88,6 +88,8 @@ shutdown_event = threading.Event()
 managed_mode = False
 generation_lock = threading.Lock()
 client_slots = threading.BoundedSemaphore(16)
+activity_lock = threading.Lock()
+active_clients = 0
 
 # ── Model ────────────────────────────────────────────────────────────
 
@@ -270,9 +272,6 @@ def _release_model_scratch():
 
 def handle_client(conn):
     """Read one JSON request, check token, generate audio, respond."""
-    global last_request_time
-    last_request_time = time.time()
-
     def send(obj):
         try:
             conn.sendall((json.dumps(obj) + "\n").encode("utf-8"))
@@ -361,24 +360,51 @@ def handle_client(conn):
             pass
 
 
+def _client_started():
+    global active_clients, last_request_time
+    with activity_lock:
+        active_clients += 1
+        last_request_time = time.time()
+
+
+def _client_finished():
+    global active_clients, last_request_time
+    with activity_lock:
+        active_clients -= 1
+        last_request_time = time.time()
+
+
 def handle_client_with_slot(conn):
     try:
         handle_client(conn)
     finally:
+        _client_finished()
         client_slots.release()
 
 
 # ── Watchdogs ────────────────────────────────────────────────────────
 
 
+def _idle_state(now=None):
+    """Return (should_exit, remaining, active) from one locked snapshot."""
+    if now is None:
+        now = time.time()
+    with activity_lock:
+        remaining = IDLE_TIMEOUT - (now - last_request_time)
+        active = active_clients
+    return remaining <= 0 and active == 0, remaining, active
+
+
 def idle_watchdog():
     while not shutdown_event.is_set():
-        remaining = IDLE_TIMEOUT - (time.time() - last_request_time)
-        if remaining <= 0:
+        should_exit, remaining, active = _idle_state()
+        if should_exit:
             log(f"idle for {IDLE_TIMEOUT}s, shutting down")
             do_shutdown()
             return
-        shutdown_event.wait(min(remaining + 0.5, 10))
+        # Active includes requests queued behind generation_lock. Never kill a
+        # live or queued read; completion refreshes last_request_time.
+        shutdown_event.wait(1 if active else min(remaining + 0.5, 10))
 
 
 def parent_watchdog():
@@ -510,6 +536,7 @@ def main():
                 log("connection rejected: capacity")
                 conn.close()
                 continue
+            _client_started()
             t = threading.Thread(
                 target=handle_client_with_slot, args=(conn,), daemon=True)
             t.start()

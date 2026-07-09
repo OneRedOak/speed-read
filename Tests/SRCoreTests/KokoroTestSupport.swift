@@ -50,6 +50,29 @@ enum KokoroTestSupport {
         }
     }
 
+    static func legacyManifestRemainsDecodable(_ paths: KokoroPaths) throws -> Bool {
+        struct LegacyManifest: Codable {
+            let mlxAudioVersion: String
+            let modelRepo: String
+            let modelRevision: String
+            let weightsSHA256: String
+            let configSHA256: String
+            let snapshotPath: String
+            let installedAt: Date
+        }
+        let legacy = LegacyManifest(
+            mlxAudioVersion: KokoroInstaller.mlxAudioVersion,
+            modelRepo: KokoroInstaller.modelRepo,
+            modelRevision: KokoroInstaller.modelRevision,
+            weightsSHA256: KokoroInstaller.weightsSHA256,
+            configSHA256: KokoroInstaller.configSHA256,
+            snapshotPath: "/nonexistent",
+            installedAt: Date(timeIntervalSince1970: 1_780_000_000))
+        try JSONEncoder().encode(legacy).write(to: paths.manifest)
+        return try KokoroInstaller(paths: paths).loadManifest()
+            .requirementsLockSHA256 == nil
+    }
+
     /// SHA-256 of a temp file containing `content`, via the streaming hasher.
     static func sha256OfContent(_ content: String) throws -> String {
         let temp = FileManager.default.temporaryDirectory

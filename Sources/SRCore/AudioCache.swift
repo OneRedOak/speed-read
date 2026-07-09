@@ -17,6 +17,11 @@ public final class AudioCache: @unchecked Sendable {
     private var _sizeCapBytes: Int
     private var _ttl: TimeInterval
     private var _enabled = true
+    private struct PendingWrite {
+        let id: UUID
+        let data: Data
+    }
+    private var pendingWrites: [String: PendingWrite] = [:]
 
     public var sizeCapBytes: Int {
         get { stateLock.withLock { _sizeCapBytes } }
@@ -29,26 +34,56 @@ public final class AudioCache: @unchecked Sendable {
     /// "No-cache" toggle for sensitive sessions (P-10).
     public var enabled: Bool {
         get { stateLock.withLock { _enabled } }
-        set { stateLock.withLock { _enabled = newValue } }
+        set {
+            stateLock.withLock {
+                _enabled = newValue
+                if !newValue { pendingWrites.removeAll() }
+            }
+            // A writer may already have copied its payload out of
+            // `pendingWrites`. Wait for the serial queue to finish its
+            // post-write policy check before returning from a disable.
+            if !newValue, DispatchQueue.getSpecific(key: queueKey) == nil {
+                queue.sync {}
+            }
+        }
     }
 
     private let directory: URL
     private let queue = DispatchQueue(label: "com.patrickellis.sr.cache", qos: .utility)
+    private let queueKey = DispatchSpecificKey<UInt8>()
     private let evictionDebounce: TimeInterval
+    private let beforeDiskWrite: (@Sendable () -> Void)?
     /// Accessed only on `queue`.
     private var evictionWorkItem: DispatchWorkItem?
     private var evictionPasses = 0
 
-    public init(directory: URL? = nil,
-                sizeCapBytes: Int = 500_000_000,
-                ttl: TimeInterval = 30 * 24 * 3600,
-                evictionDebounce: TimeInterval = 0.25) {
+    public convenience init(directory: URL? = nil,
+                            sizeCapBytes: Int = 500_000_000,
+                            ttl: TimeInterval = 30 * 24 * 3600,
+                            evictionDebounce: TimeInterval = 0.25) {
+        self.init(
+            directory: directory,
+            sizeCapBytes: sizeCapBytes,
+            ttl: ttl,
+            evictionDebounce: evictionDebounce,
+            beforeDiskWrite: nil)
+    }
+
+    /// Internal deterministic seam for exercising the no-cache transition
+    /// while a disk write is already in progress.
+    init(directory: URL?,
+         sizeCapBytes: Int,
+         ttl: TimeInterval,
+         evictionDebounce: TimeInterval,
+         beforeDiskWrite: (@Sendable () -> Void)?) {
         self.directory = directory ?? FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("sr/cache", isDirectory: true)
         self._sizeCapBytes = sizeCapBytes
         self._ttl = ttl
         self.evictionDebounce = evictionDebounce
+        self.beforeDiskWrite = beforeDiskWrite
+        queue.setSpecific(key: queueKey, value: 1)
         try? FileManager.default.createDirectory(at: self.directory,
                                                  withIntermediateDirectories: true)
     }
@@ -75,7 +110,12 @@ public final class AudioCache: @unchecked Sendable {
     // MARK: - Read / write
 
     public func lookup(_ key: String) -> Data? {
-        guard enabled else { return nil }
+        let state = stateLock.withLock { (_enabled, pendingWrites[key]?.data) }
+        guard state.0 else { return nil }
+        if let pending = state.1 {
+            SRLog.event("cache.hit", ["bytes": String(pending.count), "source": "memory"])
+            return pending
+        }
         let file = url(for: key)
         guard let data = try? Data(contentsOf: file) else {
             SRLog.event("cache.miss", [:])
@@ -89,15 +129,44 @@ public final class AudioCache: @unchecked Sendable {
     }
 
     public func store(_ key: String, data: Data) {
-        guard enabled else { return }
+        let writeID = UUID()
+        let shouldStore = stateLock.withLock { () -> Bool in
+            guard _enabled else { return false }
+            // Make the result visible immediately without blocking playback
+            // on disk I/O or a maintenance sweep queued ahead of this write.
+            pendingWrites[key] = PendingWrite(id: writeID, data: data)
+            return true
+        }
+        guard shouldStore else { return }
         let file = url(for: key)
-        queue.sync { [self] in
+        queue.async { [self] in
             // Re-check: "no-cache" flipped after enqueue must stay a hard
             // boundary — a queued write landing post-toggle would put
             // sensitive audio on disk.
-            guard enabled else { return }
-            try? data.write(to: file, options: .atomic)
-            scheduleEviction()
+            let dataToWrite = stateLock.withLock { () -> Data? in
+                guard _enabled else {
+                    pendingWrites[key] = nil
+                    return nil
+                }
+                guard pendingWrites[key]?.id == writeID else { return nil }
+                return pendingWrites[key]?.data
+            }
+            guard let dataToWrite else { return }
+            beforeDiskWrite?()
+            try? dataToWrite.write(to: file, options: .atomic)
+            let keepFile = stateLock.withLock { () -> Bool in
+                guard _enabled, pendingWrites[key]?.id == writeID else { return false }
+                pendingWrites[key] = nil
+                return true
+            }
+            if !keepFile {
+                // Policy changed (or a newer same-key write superseded us)
+                // while the atomic write was in progress. Remove the stale
+                // payload before the disable transition is allowed to return.
+                try? FileManager.default.removeItem(at: file)
+            } else {
+                scheduleEviction()
+            }
         }
     }
 

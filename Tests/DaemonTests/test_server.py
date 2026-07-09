@@ -34,5 +34,24 @@ class RequestReaderTests(unittest.TestCase):
         self.assertEqual(server._read_request_line(conn), b'{"token":"a"}')
 
 
+class IdleWatchdogTests(unittest.TestCase):
+    def test_active_client_blocks_idle_exit(self):
+        original_time = server.last_request_time
+        original_active = server.active_clients
+        try:
+            server.last_request_time = 0
+            server.active_clients = 1
+            should_exit, _, active = server._idle_state(server.IDLE_TIMEOUT + 1)
+            self.assertFalse(should_exit)
+            self.assertEqual(active, 1)
+
+            server.active_clients = 0
+            should_exit, _, _ = server._idle_state(server.IDLE_TIMEOUT + 1)
+            self.assertTrue(should_exit)
+        finally:
+            server.last_request_time = original_time
+            server.active_clients = original_active
+
+
 if __name__ == "__main__":
     unittest.main()

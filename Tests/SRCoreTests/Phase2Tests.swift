@@ -2,6 +2,14 @@ import Foundation
 import Testing
 @testable import SRCore
 
+private final class LockedTestFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = false
+
+    var value: Bool { lock.withLock { stored } }
+    func set() { lock.withLock { stored = true } }
+}
+
 @Suite struct RoutingPolicyTests {
     @Test func exactMatchWins() {
         var policy = RoutingPolicy(rules: ["com.apple.mail": .forceLocal])
@@ -81,6 +89,12 @@ import Testing
     @Test func recognizesWAVContainer() {
         #expect(AudioPayloadValidator.isWAV(Data("RIFF1234WAVEdata".utf8)))
         #expect(!AudioPayloadValidator.isWAV(Data("RIFF1234NOPEdata".utf8)))
+    }
+
+    @Test func invalidCloudAudioCanFallbackWithoutLosingMetadata() {
+        let error = TTSError.invalidAudio(
+            historyItemID: "history-1", billedCharacters: 42)
+        #expect(error.isFallbackTrigger)
     }
 }
 
@@ -209,6 +223,35 @@ import Testing
                                  modelID: "m", settings: VoiceSettings())
         cache.store(key, data: Data([9]))
         try await Task.sleep(for: .milliseconds(200))
+        cache.enabled = true
+        #expect(cache.lookup(key) == nil)
+    }
+
+    @Test func disablingCacheRetractsAnAlreadyStartedWrite() async {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sr-cache-test-\(UUID().uuidString)")
+        tempDirs.append(dir)
+        let writeStarted = LockedTestFlag()
+        let allowWrite = DispatchSemaphore(value: 0)
+        let cache = AudioCache(
+            directory: dir,
+            sizeCapBytes: 1000,
+            ttl: 3600,
+            evictionDebounce: 0.25,
+            beforeDiskWrite: {
+                writeStarted.set()
+                allowWrite.wait()
+            })
+        let key = AudioCache.key(text: "race", provider: "p", voiceID: "v",
+                                 modelID: "m", settings: VoiceSettings())
+
+        cache.store(key, data: Data([7, 8, 9]))
+        while !writeStarted.value { await Task.yield() }
+        let disable = Task.detached { cache.enabled = false }
+        while cache.enabled { await Task.yield() }
+        allowWrite.signal()
+        await disable.value
+
         cache.enabled = true
         #expect(cache.lookup(key) == nil)
     }

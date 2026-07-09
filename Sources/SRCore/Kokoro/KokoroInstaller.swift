@@ -47,7 +47,10 @@ public struct KokoroInstaller: Sendable {
         public let modelRevision: String
         public let weightsSHA256: String
         public let configSHA256: String
-        public let requirementsLockSHA256: String
+        /// Nil only for manifests written before the hashed-lock installer.
+        /// Such installs remain decodable so the UI can offer an explicit
+        /// update instead of silently pretending the model disappeared.
+        public let requirementsLockSHA256: String?
         public let snapshotPath: String
         public let installedAt: Date
     }
@@ -64,6 +67,15 @@ public struct KokoroInstaller: Sendable {
         return fm.isExecutableFile(atPath: paths.venvPython.path)
             && fm.fileExists(atPath: paths.daemonScript.path)
             && (try? loadValidatedManifest()) != nil
+    }
+
+    /// A prior or damaged runtime exists but does not satisfy current pins.
+    public var needsUpdate: Bool {
+        let fm = FileManager.default
+        return fm.isExecutableFile(atPath: paths.venvPython.path)
+            && fm.fileExists(atPath: paths.daemonScript.path)
+            && fm.fileExists(atPath: paths.manifest.path)
+            && !isInstalled
     }
 
     public func loadManifest() throws -> Manifest {
@@ -177,7 +189,9 @@ public struct KokoroInstaller: Sendable {
 
         // 1. venv (pinned interpreter; uv fetches a standalone build if needed)
         progress(.creatingVenv)
-        try await run(uv, ["venv", "--python", Self.pythonVersion, paths.venvDir.path])
+        try await run(uv, [
+            "venv", "--clear", "--python", Self.pythonVersion, paths.venvDir.path,
+        ])
         try Task.checkCancellation()
 
         // 2. Fully resolved + hashed dependency closure. Refuse a modified
@@ -314,7 +328,15 @@ public struct KokoroInstaller: Sendable {
         await withTaskCancellationHandler {
             for await _ in terminated { break }
         } onCancel: {
-            if process.isRunning { process.terminate() }
+            guard process.isRunning else { return }
+            process.terminate()
+            // Cancellation has its own short escalation deadline. Reusing
+            // the install timeout could keep AppKit in terminateLater for up
+            // to an hour if uv/python ignores SIGTERM.
+            Task.detached {
+                try? await Task.sleep(for: .seconds(5))
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            }
         }
         try Task.checkCancellation()
 

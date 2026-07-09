@@ -105,12 +105,13 @@ public actor KokoroDaemonSupervisor {
         } catch {
             throw SupervisorError.notInstalled
         }
-        if fm.fileExists(atPath: paths.modelLink.path) {
-            let values = try? paths.modelLink.resourceValues(forKeys: [.isSymbolicLinkKey])
-            guard values?.isSymbolicLink == true else {
-                throw SupervisorError.spawnFailed("model link path is not a symlink")
-            }
+        // `fileExists` follows symlinks and returns false for a dangling one.
+        // Ask for the link destination first so stale cache cleanup cannot
+        // strand an invisible link that blocks recreation.
+        if (try? fm.destinationOfSymbolicLink(atPath: paths.modelLink.path)) != nil {
             try fm.removeItem(at: paths.modelLink)
+        } else if fm.fileExists(atPath: paths.modelLink.path) {
+            throw SupervisorError.spawnFailed("model link path is not a symlink")
         }
         try fm.createSymbolicLink(
             at: paths.modelLink,

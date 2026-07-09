@@ -87,6 +87,12 @@ import Testing
         #expect(try KokoroTestSupport.validatedManifestRejectsMissingSnapshot(paths))
     }
 
+    @Test func legacyManifestRemainsDecodableForUpdatePrompt() throws {
+        let (paths, cleanup) = try KokoroTestSupport.tempPaths()
+        defer { cleanup() }
+        #expect(try KokoroTestSupport.legacyManifestRemainsDecodable(paths))
+    }
+
     // MARK: - Socket health check
 
     @Test func socketConnectableFalseForMissingSocket() {

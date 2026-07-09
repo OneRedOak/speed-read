@@ -6,10 +6,13 @@ build:
 # CLT-only toolchain: Swift Testing framework lives outside the default
 # search path (and XCTest is absent entirely — tests use Swift Testing).
 TESTING_FW := /Library/Developer/CommandLineTools/Library/Developer/Frameworks
+DEVELOPER_DIR := $(shell xcode-select -p 2>/dev/null)
+ifeq ($(DEVELOPER_DIR),/Library/Developer/CommandLineTools)
 ifneq ($(wildcard $(TESTING_FW)/Testing.framework),)
 SWIFT_TEST_FLAGS := -Xswiftc -F$(TESTING_FW) \
 	-Xswiftc -Xfrontend -Xswiftc -disable-cross-import-overlays \
 	-Xlinker -F$(TESTING_FW) -Xlinker -rpath -Xlinker $(TESTING_FW)
+endif
 endif
 
 # -disable-cross-import-overlays lets test files import Foundation alongside

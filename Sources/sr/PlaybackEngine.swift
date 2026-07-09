@@ -6,6 +6,37 @@ private final class ConverterInputState: @unchecked Sendable {
     var fed = false
 }
 
+/// Ordered cursor for a bounded seek/rate-change rerender. Keeping the cursor
+/// active at the current tail lets segments decoded mid-rerender join the same
+/// ordered stream instead of being scheduled early and then repeated.
+struct RerenderWindowCursor {
+    private(set) var nextSegmentIndex: Int?
+    private var firstOffset: AVAudioFrameCount = 0
+
+    var isActive: Bool { nextSegmentIndex != nil }
+
+    mutating func begin(at index: Int, firstOffset: AVAudioFrameCount) {
+        nextSegmentIndex = index
+        self.firstOffset = firstOffset
+    }
+
+    mutating func takeNext(existingSegmentCount: Int)
+        -> (index: Int, offset: AVAudioFrameCount)? {
+        guard let index = nextSegmentIndex, index < existingSegmentCount else { return nil }
+        let offset = firstOffset
+        firstOffset = 0
+        // Deliberately retain `existingSegmentCount` as the next index at the
+        // current tail; a later decode can then be consumed in order.
+        nextSegmentIndex = index + 1
+        return (index, offset)
+    }
+
+    mutating func reset() {
+        nextSegmentIndex = nil
+        firstOffset = 0
+    }
+}
+
 /// Timeline audio player with time-domain speed control and seeking
 /// (F-7, F-8).
 ///
@@ -58,7 +89,6 @@ final class PlaybackEngine: ObservableObject {
     private struct Segment {
         let encodedAudio: Data
         let pauseFrames: AVAudioFrameCount
-        let frameLength: AVAudioFramePosition
     }
 
     // Content timeline metadata + compressed source audio. PCM is decoded on
@@ -72,6 +102,8 @@ final class PlaybackEngine: ObservableObject {
     private var appendedCount = 0
     private var pendingDecodes = 0
     private var pendingRenders = 0
+    private var rerenderCursor = RerenderWindowCursor()
+    private let renderWindowSize = 4
 
     // Playback run state.
     private var renderRate: Double = 1.0                // rate of scheduled audio
@@ -197,13 +229,18 @@ final class PlaybackEngine: ObservableObject {
         segmentStartFrames.append(totalFrames)
         segments.append(Segment(
             encodedAudio: data,
-            pauseFrames: pauseFrames,
-            frameLength: AVAudioFramePosition(block.frameLength)))
+            pauseFrames: pauseFrames))
         totalFrames += AVAudioFramePosition(block.frameLength)
         availableSeconds = Double(totalFrames) / Self.sampleRate
         appendedCount += 1
 
-        enqueueStretchAndSchedule(block)
+        if rerenderCursor.isActive {
+            // A seek/rate rerender owns scheduling order until the session
+            // ends. Its cursor will consume this newly appended segment.
+            pumpRerenderWindow()
+        } else {
+            enqueueStretchAndSchedule(block)
+        }
     }
 
     // MARK: - Transport (F-7)
@@ -268,6 +305,7 @@ final class PlaybackEngine: ObservableObject {
         appendedCount = 0
         pendingDecodes = 0
         pendingRenders = 0
+        rerenderCursor.reset()
         baseFrame = 0
         pausedAtFrame = 0
         outstandingBuffers = 0
@@ -337,14 +375,21 @@ final class PlaybackEngine: ObservableObject {
         pausedAtFrame = clamped
 
         guard let startSegment = segmentIndex(containing: clamped) else { return }
-        let offset = AVAudioFrameCount(clamped - segmentStartFrames[startSegment])
-        enqueueSegmentRender(segments[startSegment], offset: offset)
-        if startSegment + 1 < segments.count {
-            for segment in segments[(startSegment + 1)...] {
-                enqueueSegmentRender(segment, offset: 0)
-            }
-        }
+        rerenderCursor.begin(
+            at: startSegment,
+            firstOffset: AVAudioFrameCount(clamped - segmentStartFrames[startSegment]))
+        pumpRerenderWindow()
         updateUIPosition()
+    }
+
+    /// Keep only a small decoded/rendered window ahead of the playhead. A
+    /// seek or rate change on a long read must not decode every remaining
+    /// compressed segment at once.
+    private func pumpRerenderWindow() {
+        while pendingRenders + outstandingBuffers < renderWindowSize,
+              let next = rerenderCursor.takeNext(existingSegmentCount: segments.count) {
+            enqueueSegmentRender(segments[next.index], offset: next.offset)
+        }
     }
 
     /// Re-decode a compressed segment for seek/rate-change rendering. This is
@@ -412,6 +457,7 @@ final class PlaybackEngine: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self, self.generation == gen else { return }
                 self.outstandingBuffers -= 1
+                self.pumpRerenderWindow()
                 if self.outstandingBuffers == 0,
                    !PlaybackCompletionPolicy.canFinish(
                     totalSentences: self.totalSentences,

@@ -51,6 +51,10 @@ public struct SynthesisResult: Sendable {
 public enum TTSError: Error, Sendable {
     case missingAPIKey
     case http(status: Int, body: String?)
+    /// A billed HTTP-200 response whose body was not decodable audio. Carry
+    /// provider metadata so cost accounting and optional history deletion
+    /// still happen before fallback/failure handling.
+    case invalidAudio(historyItemID: String?, billedCharacters: Int?)
     case network(underlying: String)
     case budgetExceeded
     case cancelled
@@ -59,6 +63,7 @@ public enum TTSError: Error, Sendable {
     public var isFallbackTrigger: Bool {
         switch self {
         case .http(let status, _): return status == 429 || status >= 500
+        case .invalidAudio: return true
         case .network: return true
         case .missingAPIKey: return true
         case .budgetExceeded, .cancelled: return false

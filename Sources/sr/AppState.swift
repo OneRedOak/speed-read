@@ -36,6 +36,7 @@ final class AppState: ObservableObject {
     @Published var historyStatus: String = ""
     @Published var kokoroInstallStatus: String?
     @Published var kokoroInstalled = KokoroRuntime.shared.isInstalled
+    @Published var kokoroNeedsUpdate = KokoroRuntime.shared.installer.needsUpdate
     @Published private(set) var accessibilityGranted = AXIsProcessTrusted()
 
     @Published var playbackRate: Double {
@@ -77,6 +78,7 @@ final class AppState: ObservableObject {
 
     private var statusClearTask: Task<Void, Never>?
     private var installTask: Task<Void, Never>?
+    private var preparationTask: Task<Void, Never>?
     private var cancellables: Set<AnyCancellable> = []
     /// Serializes selection captures: two concurrent ⌘C fallbacks snapshot/
     /// restore each other's transient pasteboard state and can permanently
@@ -213,6 +215,8 @@ final class AppState: ObservableObject {
 
     func stop() {
         preparationGeneration += 1
+        preparationTask?.cancel()
+        preparationTask = nil
         pipeline.cancel()
         playback.stop()
         activeUsesCloud = false
@@ -281,14 +285,34 @@ final class AppState: ObservableObject {
     private func speak(_ raw: String,
                        captureMethod: SelectionCapture.Method,
                        routingAction: RoutingPolicy.Action) {
+        guard raw.count <= Chunker.maxReadCharacters else {
+            lastError = "Selection is too large (maximum \(Chunker.maxReadCharacters.formatted()) characters)."
+            flashStatus(lastError!)
+            return
+        }
         preparationGeneration += 1
         let preparation = preparationGeneration
-        Task { @MainActor [weak self] in
-            let prepared = await Task.detached(priority: .userInitiated) {
+        preparationTask?.cancel()
+        preparationTask = Task { @MainActor [weak self] in
+            let worker = Task.detached(priority: .userInitiated) {
+                () -> (String, [Chunk])? in
+                guard !Task.isCancelled else { return nil }
                 let normalized = Normalizer.normalize(raw)
-                return (normalized, Chunker.split(normalized))
-            }.value
-            guard let self, self.preparationGeneration == preparation else { return }
+                guard !Task.isCancelled else { return nil }
+                let chunks = Chunker.split(normalized)
+                guard !Task.isCancelled else { return nil }
+                return (normalized, chunks)
+            }
+            let prepared = await withTaskCancellationHandler {
+                await worker.value
+            } onCancel: {
+                worker.cancel()
+            }
+            guard let self,
+                  !Task.isCancelled,
+                  self.preparationGeneration == preparation,
+                  let prepared else { return }
+            self.preparationTask = nil
             self.beginPreparedSpeak(
                 normalized: prepared.0,
                 chunks: prepared.1,
@@ -363,6 +387,7 @@ final class AppState: ObservableObject {
         playback.startSession(totalSentences: chunks.count)
         activeUsesCloud = !routes.isLocal
         playback.onFinished = { [weak self] in
+            self?.activeUsesCloud = false
             self?.refreshCredits()
         }
         playback.onError = { [weak self] message in
@@ -404,6 +429,9 @@ final class AppState: ObservableObject {
                     }
                 },
                 fellBack: { [weak self] in
+                    // Fallback is one-way for the rest of this read, so the
+                    // live Local-Only boundary no longer needs to stop it.
+                    self?.activeUsesCloud = false
                     self?.flashStatus("Cloud unavailable — using local voice")
                 },
                 failed: { [weak self] error in
@@ -499,6 +527,7 @@ final class AppState: ObservableObject {
                 case .done:
                     kokoroInstallStatus = nil
                     kokoroInstalled = true
+                    kokoroNeedsUpdate = false
                     flashStatus("Local voice installed")
                 case .failed(let message):
                     kokoroInstallStatus = nil
@@ -552,6 +581,8 @@ final class AppState: ObservableObject {
             lastError = "ElevenLabs quota exceeded."
         case .http(let status, _):
             lastError = "Synthesis error (HTTP \(status))."
+        case .invalidAudio:
+            lastError = "ElevenLabs returned invalid audio; the read was stopped."
         case .network(let detail) where detail.hasPrefix("kokoro"):
             lastError = "Local voice unavailable."
         case .network:

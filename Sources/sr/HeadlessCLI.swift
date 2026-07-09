@@ -122,6 +122,9 @@ enum HeadlessCLI {
             print("already installed")
             return 0
         }
+        if KokoroRuntime.shared.installer.needsUpdate {
+            print("updating existing local voice runtime…")
+        }
         for await progress in KokoroRuntime.shared.installer.install(
             daemonSourceURL: source,
             requirementsLockURL: requirementsLock) {
@@ -173,6 +176,10 @@ enum HeadlessCLI {
             KokoroRuntime.shared.installer.syncDaemonScript(from: source)
         }
         let settings = SettingsStore()
+        guard text.count <= Chunker.maxReadCharacters else {
+            print("input too large (maximum \(Chunker.maxReadCharacters) characters)")
+            return 1
+        }
         let normalized = Normalizer.normalize(text)
         guard normalized.count <= Chunker.maxReadCharacters else {
             print("input too large (maximum \(Chunker.maxReadCharacters) characters)")
@@ -312,6 +319,7 @@ enum HeadlessCLI {
         switch error {
         case .missingAPIKey: return "missing ElevenLabs API key"
         case .http(let status, _): return "provider HTTP \(status)"
+        case .invalidAudio: return "provider returned invalid audio"
         case .network(let detail) where detail.hasPrefix("kokoro"):
             return "local voice unavailable"
         case .network: return "provider network error"

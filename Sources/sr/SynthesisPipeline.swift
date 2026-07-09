@@ -58,10 +58,12 @@ final class SynthesisPipeline: @unchecked Sendable {
         }
 
         @Sendable func synthesizeOn(_ route: Route, chunk: Chunk) async throws -> Data {
+            try Task.checkCancellation()
             let key = cacheKey(route, chunk)
             if let cached = cache?.lookup(key) { return cached }
 
             return try await flights.value(for: key) {
+                try Task.checkCancellation()
                 // A sibling may have filled the cache while this task waited
                 // for ownership of the single-flight operation.
                 if let cached = cache?.lookup(key) { return cached }
@@ -78,8 +80,21 @@ final class SynthesisPipeline: @unchecked Sendable {
 
                 let result: SynthesisResult
                 do {
+                    try Task.checkCancellation()
                     result = try await route.provider.synthesize(
                         text: chunk.text, voiceID: route.voiceID, settings: settings)
+                } catch let error as TTSError {
+                    if case .invalidAudio(let historyID, let billedCharacters) = error {
+                        if let reservation {
+                            let billed = max(billedCharacters ?? chunk.text.count, 0)
+                            budget.settle(reservation: reservation, actual: billed)
+                            callbacks.billed(billed)
+                        }
+                        if let historyID { callbacks.historyID(historyID) }
+                    } else if let reservation {
+                        budget.release(reservation)
+                    }
+                    throw error
                 } catch {
                     if let reservation { budget.release(reservation) }
                     throw error
@@ -171,10 +186,10 @@ final class SynthesisPipeline: @unchecked Sendable {
     }
 
     func cancel() {
-        flights?.cancelAll()
-        flights = nil
         task?.cancel()
         task = nil
+        flights?.cancelAll()
+        flights = nil
     }
 }
 
@@ -247,7 +262,8 @@ private final class AtomicBudget: @unchecked Sendable {
 
 /// Deduplicates identical in-flight cache misses. Side effects live inside the
 /// owner operation, so billing/history callbacks run exactly once.
-private final class SynthesisSingleFlight: @unchecked Sendable {
+/// Internal for cancellation regression tests.
+final class SynthesisSingleFlight: @unchecked Sendable {
     private struct Entry {
         let id: UUID
         let task: Task<Data, Error>
@@ -255,12 +271,15 @@ private final class SynthesisSingleFlight: @unchecked Sendable {
 
     private let lock = NSLock()
     private var entries: [String: Entry] = [:]
+    private var cancelled = false
 
     func value(
         for key: String,
         operation: @escaping @Sendable () async throws -> Data
     ) async throws -> Data {
-        let entry: Entry = lock.withLock {
+        try Task.checkCancellation()
+        let entry: Entry = try lock.withLock {
+            guard !cancelled else { throw CancellationError() }
             if let existing = entries[key] { return existing }
             let created = Entry(id: UUID(), task: Task { try await operation() })
             entries[key] = created
@@ -276,6 +295,7 @@ private final class SynthesisSingleFlight: @unchecked Sendable {
 
     func cancelAll() {
         let tasks: [Task<Data, Error>] = lock.withLock {
+            cancelled = true
             let tasks = entries.values.map(\.task)
             entries.removeAll()
             return tasks
@@ -291,6 +311,8 @@ extension TTSError: Equatable {
              (.budgetExceeded, .budgetExceeded),
              (.cancelled, .cancelled):
             return true
+        case (.invalidAudio(let ah, let ab), .invalidAudio(let bh, let bb)):
+            return ah == bh && ab == bb
         case (.http(let a, _), .http(let b, _)):
             return a == b
         case (.network(let a), .network(let b)):

@@ -275,7 +275,9 @@ struct MenuView: View {
             }
         }
         if !state.kokoroInstalled && state.kokoroInstallStatus == nil {
-            Button("Install Local Voice (Kokoro, ~330 MB)…") {
+            Button(state.kokoroNeedsUpdate
+                   ? "Update Local Voice Runtime…"
+                   : "Install Local Voice (Kokoro, ~330 MB)…") {
                 state.installKokoro()
             }
             .buttonStyle(.borderless)
