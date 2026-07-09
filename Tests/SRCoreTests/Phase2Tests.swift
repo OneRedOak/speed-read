@@ -36,6 +36,41 @@ import Testing
     }
 }
 
+@Suite struct BackendRoutingTests {
+    @Test func localModeIsAlwaysLocal() {
+        #expect(BackendRouting.plan(
+            mode: .local, forceLocal: false,
+            localAvailable: true, hasCloudCredential: true) == .localOnly)
+        #expect(BackendRouting.plan(
+            mode: .local, forceLocal: false,
+            localAvailable: false, hasCloudCredential: true) == .localUnavailable)
+    }
+
+    @Test func cloudModeNeverFallsBackLocally() {
+        #expect(BackendRouting.plan(
+            mode: .cloud, forceLocal: false,
+            localAvailable: true, hasCloudCredential: true) == .cloudOnly)
+    }
+
+    @Test func autoUsesAvailableCredentialsAndFallback() {
+        #expect(BackendRouting.plan(
+            mode: .auto, forceLocal: false,
+            localAvailable: true, hasCloudCredential: true) == .cloudWithLocalFallback)
+        #expect(BackendRouting.plan(
+            mode: .auto, forceLocal: false,
+            localAvailable: true, hasCloudCredential: false) == .localOnly)
+        #expect(BackendRouting.plan(
+            mode: .auto, forceLocal: false,
+            localAvailable: false, hasCloudCredential: false) == .cloudOnly)
+    }
+
+    @Test func forceLocalCanOnlyTightenPrivacy() {
+        #expect(BackendRouting.plan(
+            mode: .cloud, forceLocal: true,
+            localAvailable: true, hasCloudCredential: true) == .localOnly)
+    }
+}
+
 @Suite struct CostLedgerTests {
     private func freshLedger() -> CostLedger {
         let defaults = UserDefaults(suiteName: "sr-tests-\(UUID().uuidString)")!
