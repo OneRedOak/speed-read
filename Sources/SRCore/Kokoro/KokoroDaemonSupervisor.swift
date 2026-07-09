@@ -99,15 +99,26 @@ public actor KokoroDaemonSupervisor {
         // snapshot dir (named by revision hash) would not load. Missing/stale
         // manifest → no env var → daemon falls back to the model ID.
         let fm = FileManager.default
-        if let manifest = try? KokoroInstaller(paths: paths).loadManifest(),
-           fm.fileExists(atPath: manifest.snapshotPath) {
-            try? fm.removeItem(at: paths.modelLink)
-            try? fm.createSymbolicLink(at: paths.modelLink,
-                                       withDestinationURL: URL(fileURLWithPath: manifest.snapshotPath))
-            if fm.fileExists(atPath: paths.modelLink.path) {
-                env["SR_MODEL_PATH"] = paths.modelLink.path
-            }
+        let manifest: KokoroInstaller.Manifest
+        do {
+            manifest = try KokoroInstaller(paths: paths).loadValidatedManifest()
+        } catch {
+            throw SupervisorError.notInstalled
         }
+        if fm.fileExists(atPath: paths.modelLink.path) {
+            let values = try? paths.modelLink.resourceValues(forKeys: [.isSymbolicLinkKey])
+            guard values?.isSymbolicLink == true else {
+                throw SupervisorError.spawnFailed("model link path is not a symlink")
+            }
+            try fm.removeItem(at: paths.modelLink)
+        }
+        try fm.createSymbolicLink(
+            at: paths.modelLink,
+            withDestinationURL: URL(fileURLWithPath: manifest.snapshotPath))
+        guard fm.fileExists(atPath: paths.modelLink.path) else {
+            throw SupervisorError.spawnFailed("verified model link could not be created")
+        }
+        env["SR_MODEL_PATH"] = paths.modelLink.path
         p.environment = ProcessInfo.processInfo.environment.merging(env) { _, new in new }
         p.standardInput = FileHandle.nullDevice
         p.standardOutput = FileHandle.nullDevice

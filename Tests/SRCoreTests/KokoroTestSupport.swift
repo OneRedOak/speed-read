@@ -39,6 +39,16 @@ enum KokoroTestSupport {
         return (loaded.mlxAudioVersion, loaded.modelRevision, loaded.weightsSHA256)
     }
 
+    static func validatedManifestRejectsMissingSnapshot(_ paths: KokoroPaths) throws -> Bool {
+        _ = try manifestRoundTrip(paths)
+        do {
+            _ = try KokoroInstaller(paths: paths).loadValidatedManifest()
+            return false
+        } catch {
+            return true
+        }
+    }
+
     /// SHA-256 of a temp file containing `content`, via the streaming hasher.
     static func sha256OfContent(_ content: String) throws -> String {
         let temp = FileManager.default.temporaryDirectory

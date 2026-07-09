@@ -269,6 +269,13 @@ enum UnixSocketLineClient {
     ) throws -> String {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw SocketError(message: "socket() failed") }
+        var noSigPipe: Int32 = 1
+        guard setsockopt(
+            fd, SOL_SOCKET, SO_NOSIGPIPE,
+            &noSigPipe, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+            close(fd)
+            throw SocketError(message: "SO_NOSIGPIPE failed")
+        }
         guard fdBox.set(fd) else {
             close(fd)
             throw CancellationError()

@@ -13,6 +13,7 @@ test:
 	swift test -Xswiftc -F$(TESTING_FW) \
 		-Xswiftc -Xfrontend -Xswiftc -disable-cross-import-overlays \
 		-Xlinker -F$(TESTING_FW) -Xlinker -rpath -Xlinker $(TESTING_FW)
+	python3 -m unittest discover -s Tests/DaemonTests -p 'test_*.py'
 
 app:
 	bash scripts/build-app.sh release

@@ -81,6 +81,12 @@ import Testing
         #expect(weightsSHA == KokoroInstaller.weightsSHA256)
     }
 
+    @Test func validatedManifestFailsClosedWhenSnapshotIsMissing() throws {
+        let (paths, cleanup) = try KokoroTestSupport.tempPaths()
+        defer { cleanup() }
+        #expect(try KokoroTestSupport.validatedManifestRejectsMissingSnapshot(paths))
+    }
+
     // MARK: - Socket health check
 
     @Test func socketConnectableFalseForMissingSocket() {

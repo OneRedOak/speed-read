@@ -60,12 +60,39 @@ public struct KokoroInstaller: Sendable {
         let fm = FileManager.default
         return fm.isExecutableFile(atPath: paths.venvPython.path)
             && fm.fileExists(atPath: paths.daemonScript.path)
-            && (try? loadManifest()) != nil
+            && (try? loadValidatedManifest()) != nil
     }
 
     public func loadManifest() throws -> Manifest {
         let data = try Data(contentsOf: paths.manifest)
         return try JSONDecoder().decode(Manifest.self, from: data)
+    }
+
+    /// Validate the cheap, immutable install invariants on every launch. The
+    /// large weights were hashed during install; here we make sure the manifest
+    /// still names those pins and its verified snapshot still exists.
+    public func loadValidatedManifest() throws -> Manifest {
+        let manifest = try loadManifest()
+        guard manifest.mlxAudioVersion == Self.mlxAudioVersion,
+              manifest.modelRepo == Self.modelRepo,
+              manifest.modelRevision == Self.modelRevision,
+              manifest.weightsSHA256 == Self.weightsSHA256,
+              manifest.configSHA256 == Self.configSHA256 else {
+            throw InstallError(message: "installed manifest does not match bundled pins")
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(
+            atPath: manifest.snapshotPath, isDirectory: &isDirectory),
+              isDirectory.boolValue,
+              FileManager.default.fileExists(atPath:
+                URL(fileURLWithPath: manifest.snapshotPath)
+                    .appendingPathComponent(Self.weightsFile).path),
+              FileManager.default.fileExists(atPath:
+                URL(fileURLWithPath: manifest.snapshotPath)
+                    .appendingPathComponent("config.json").path) else {
+            throw InstallError(message: "verified model snapshot is missing")
+        }
+        return manifest
     }
 
     /// Refresh the installed daemon script when the bundled one changed.
@@ -78,11 +105,7 @@ public struct KokoroInstaller: Sendable {
         let installed = try? Data(contentsOf: paths.daemonScript)
         guard bundled != installed else { return }
         do {
-            let fm = FileManager.default
-            if fm.fileExists(atPath: paths.daemonScript.path) {
-                try fm.removeItem(at: paths.daemonScript)
-            }
-            try bundled.write(to: paths.daemonScript)
+            try bundled.write(to: paths.daemonScript, options: .atomic)
             SRLog.event("kokoro.daemon_script_synced", [:])
         } catch {
             SRLog.error("kokoro.daemon_script_sync", ["error": String(describing: error)])

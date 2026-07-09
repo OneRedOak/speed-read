@@ -22,8 +22,7 @@ Protocol (one JSON object per line, UTF-8):
 
 Modes:
   Default:   auto-shuts down after idle timeout (SR_IDLE_TIMEOUT, default 300s).
-  --managed: no idle timeout; shuts down when the parent process exits
-             (or on SIGTERM).
+  --managed: shuts down on idle timeout, parent exit, or SIGTERM.
 
 Logging is content-free (P-5): text lengths only, never text.
 """
@@ -88,6 +87,7 @@ server_socket = None
 shutdown_event = threading.Event()
 managed_mode = False
 generation_lock = threading.Lock()
+client_slots = threading.BoundedSemaphore(16)
 
 # ── Model ────────────────────────────────────────────────────────────
 
@@ -99,6 +99,8 @@ def load_tts_model():
     if MODEL_PATH and os.path.isdir(MODEL_PATH):
         log("loading model from verified snapshot path")
         model = load_model(MODEL_PATH)
+    elif managed_mode:
+        raise RuntimeError("verified model path missing")
     else:
         log(f"loading model {MODEL_ID}")
         model = load_model(MODEL_ID)
@@ -236,6 +238,36 @@ def _client_gone(conn):
         return True
 
 
+class RequestTooLarge(Exception):
+    """Raised before parsing when a request exceeds the wire cap."""
+
+
+def _read_request_line(conn):
+    data = b""
+    conn.settimeout(10)
+    while True:
+        chunk = conn.recv(65536)
+        if not chunk:
+            break
+        data += chunk
+        # Check size before accepting a newline from the same recv. The old
+        # order let MAX_REQUEST_BYTES + one socket chunk through.
+        if len(data) > MAX_REQUEST_BYTES:
+            raise RequestTooLarge()
+        if b"\n" in data:
+            return data.split(b"\n", 1)[0]
+    return data
+
+
+def _release_model_scratch():
+    """Release per-request scratch while the generation lock is still held."""
+    import gc
+    import mlx.core as mx
+
+    gc.collect()
+    mx.metal.clear_cache()
+
+
 def handle_client(conn):
     """Read one JSON request, check token, generate audio, respond."""
     global last_request_time
@@ -248,19 +280,12 @@ def handle_client(conn):
             pass
 
     try:
-        data = b""
-        conn.settimeout(10)
-        while True:
-            chunk = conn.recv(65536)
-            if not chunk:
-                break
-            data += chunk
-            if b"\n" in data:
-                break
-            if len(data) > MAX_REQUEST_BYTES:
-                log(f"request rejected: oversized ({len(data)} bytes, no newline)")
-                send({"status": "error", "message": "request too large"})
-                return
+        try:
+            data = _read_request_line(conn)
+        except RequestTooLarge:
+            log("request rejected: oversized")
+            send({"status": "error", "message": "request too large"})
+            return
 
         if not data.strip():
             return
@@ -299,11 +324,22 @@ def handle_client(conn):
 
         log(f"request: text_len={len(text)} voice={voice} speed={speed} lang={lang_code}")
 
+        if _client_gone(conn):
+            raise CancelledError("client disconnected before generation")
+
         with generation_lock:
-            audio_file = generate_audio(
-                text, voice, speed, lang_code,
-                cancel_check=lambda: _client_gone(conn),
-            )
+            # Requests can wait behind another sentence after their client has
+            # already canceled. Re-check immediately after acquiring the lock
+            # so stale work never reaches model.generate().
+            if _client_gone(conn):
+                raise CancelledError("client disconnected while queued")
+            try:
+                audio_file = generate_audio(
+                    text, voice, speed, lang_code,
+                    cancel_check=lambda: _client_gone(conn),
+                )
+            finally:
+                _release_model_scratch()
 
         # Size before send: once the response is out, the client owns the
         # temp dir and may delete it before we could stat it.
@@ -314,24 +350,22 @@ def handle_client(conn):
     except CancelledError:
         log("generation cancelled (client disconnected)")
     except Exception as e:
-        # Content-free (P-5): log the type only — exception MESSAGES from
-        # the model stack can embed request text fragments. The full message
-        # still goes to the client, which already holds the text.
+        # Content-free (P-5): exception messages can embed request fragments,
+        # so neither logs nor the wire response include them.
         log(f"error: {type(e).__name__}")
-        send({"status": "error", "message": f"{type(e).__name__}: {e}"})
+        send({"status": "error", "message": type(e).__name__})
     finally:
         try:
             conn.close()
         except OSError:
             pass
-        # Release MLX metal buffers after the response (not between
-        # sentences) so back-to-back requests don't pay gc overhead.
-        import gc
 
-        import mlx.core as mx
 
-        gc.collect()
-        mx.metal.clear_cache()
+def handle_client_with_slot(conn):
+    try:
+        handle_client(conn)
+    finally:
+        client_slots.release()
 
 
 # ── Watchdogs ────────────────────────────────────────────────────────
@@ -442,11 +476,11 @@ def main():
     load_tts_model()
     warmup_pipeline()
 
+    # Managed daemons need both guarantees: die with the parent, and unload
+    # the model after inactivity so a prewarm does not pin Metal/RAM forever.
+    threading.Thread(target=idle_watchdog, daemon=True).start()
     if managed_mode:
-        watchdog = threading.Thread(target=parent_watchdog, daemon=True)
-    else:
-        watchdog = threading.Thread(target=idle_watchdog, daemon=True)
-    watchdog.start()
+        threading.Thread(target=parent_watchdog, daemon=True).start()
 
     # Creating the socket signals readiness. 0600 before listen (P-9).
     server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -472,7 +506,12 @@ def main():
     while not shutdown_event.is_set():
         try:
             conn, _ = server_socket.accept()
-            t = threading.Thread(target=handle_client, args=(conn,), daemon=True)
+            if not client_slots.acquire(blocking=False):
+                log("connection rejected: capacity")
+                conn.close()
+                continue
+            t = threading.Thread(
+                target=handle_client_with_slot, args=(conn,), daemon=True)
             t.start()
         except socket.timeout:
             continue
