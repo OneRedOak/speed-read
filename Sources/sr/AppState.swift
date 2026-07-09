@@ -54,7 +54,15 @@ final class AppState: ObservableObject {
     }
     /// Backend mode; `.local` is the Local-Only master switch (P-8).
     @Published var backendMode: SettingsStore.BackendMode {
-        didSet { settings.backendMode = backendMode }
+        didSet {
+            settings.backendMode = backendMode
+            // Local-Only is a live privacy boundary, not a preference for the
+            // next read. Stop a cloud-backed session before more chunks upload.
+            if backendMode == .local, oldValue != .local, activeUsesCloud {
+                stop()
+                flashStatus("Cloud read stopped — Local-Only is active")
+            }
+        }
     }
     @Published var autoDeleteHistory: Bool {
         didSet { settings.autoDeleteHistory = autoDeleteHistory }
@@ -75,6 +83,7 @@ final class AppState: ObservableObject {
     /// Bumped per speak(); stale pipeline deliveries (a chunk that slipped
     /// past cancellation) are dropped instead of feeding into the new session.
     private var speakGeneration = 0
+    private var activeUsesCloud = false
 
     init() {
         let store = SettingsStore()
@@ -183,23 +192,32 @@ final class AppState: ObservableObject {
             let result = SelectionCapture.capture()
             await MainActor.run {
                 captureInFlight = false
-                handleCapture(result, routingAction: action)
+                handleCapture(result, fallbackRoutingAction: action)
             }
         }
     }
 
     func speakClipboard() {
+        let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let action = routing.action(for: bundleID)
+        if action == .block {
+            NSSound.beep()
+            flashStatus("Speaking blocked for this app")
+            SRLog.event("routing.blocked", ["source": "clipboard"])
+            return
+        }
         if playback.isActive { stop() }
-        handleCapture(SelectionCapture.clipboardText(), routingAction: .default)
+        handleCapture(SelectionCapture.clipboardText(), fallbackRoutingAction: action)
     }
 
     func stop() {
         pipeline.cancel()
         playback.stop()
+        activeUsesCloud = false
     }
 
     private func handleCapture(_ result: SelectionCapture.CaptureResult,
-                               routingAction: RoutingPolicy.Action) {
+                               fallbackRoutingAction: RoutingPolicy.Action) {
         switch result {
         case .accessibilityDenied:
             accessibilityGranted = false
@@ -212,7 +230,17 @@ final class AppState: ObservableObject {
             // shouldn't kill the read in progress.
             NSSound.beep()
             flashStatus("No selection found")
-        case .text(let raw, let method):
+        case .text(let raw, let method, let sourceBundleID):
+            // Re-resolve against the element that actually supplied the text.
+            // Focus can change while the detached AX/clipboard capture runs.
+            let routingAction = sourceBundleID.map { routing.action(for: $0) }
+                ?? fallbackRoutingAction
+            if routingAction == .block {
+                NSSound.beep()
+                flashStatus("Speaking blocked for this app")
+                SRLog.event("routing.blocked", ["source": method.rawValue])
+                return
+            }
             speak(raw, captureMethod: method, routingAction: routingAction)
         }
     }
@@ -228,24 +256,23 @@ final class AppState: ObservableObject {
         let cloudRoute = SynthesisPipeline.Route(
             provider: ElevenLabsProvider(modelID: modelID), voiceID: voiceID, modelID: modelID)
 
-        if wantsLocal {
-            guard kokoroReady else {
-                lastError = "Local voice not installed — use \"Install Local Voice\" in the menu."
-                flashStatus(lastError!)
-                return nil
-            }
+        let plan = BackendRouting.plan(
+            mode: backendMode,
+            forceLocal: wantsLocal,
+            localAvailable: kokoroReady,
+            hasCloudCredential: KeychainStore.readAPIKey() != nil)
+
+        switch plan {
+        case .localUnavailable:
+            lastError = "Local voice not installed — use \"Install Local Voice\" in the menu."
+            flashStatus(lastError!)
+            return nil
+        case .localOnly:
             return (localRoute, nil, true)
-        }
-        switch backendMode {
-        case .cloud:
+        case .cloudOnly:
             return (cloudRoute, nil, false)
-        case .auto, .local:
-            // Auto: cloud primary, local fallback when available. No API key →
-            // go straight local if we can (ported from speak.sh).
-            if KeychainStore.readAPIKey() == nil && kokoroReady {
-                return (localRoute, nil, true)
-            }
-            return (cloudRoute, kokoroReady ? localRoute : nil, false)
+        case .cloudWithLocalFallback:
+            return (cloudRoute, localRoute, false)
         }
     }
 
@@ -307,6 +334,7 @@ final class AppState: ObservableObject {
         let generation = speakGeneration
 
         playback.startSession(totalSentences: chunks.count)
+        activeUsesCloud = !routes.isLocal
         playback.onFinished = { [weak self] in
             self?.refreshCredits()
         }
@@ -314,12 +342,16 @@ final class AppState: ObservableObject {
         let deleteHistory = autoDeleteHistory
         let janitor = janitor
         let ledger = ledger
+        let cloudBudgetRemaining = !routes.isLocal && !ledger.overriddenToday
+            ? max(ledger.dailyBudget - ledger.spentToday, 0)
+            : nil
         pipeline.run(
             chunks: chunks,
             primary: routes.primary,
             fallback: routes.fallback,
             settings: settings.voiceSettings,
             cache: cacheEnabled ? AudioCache.shared : nil,
+            cloudBudgetRemaining: cloudBudgetRemaining,
             callbacks: .init(
                 deliver: { [weak self] index, audio in
                     guard let self, self.speakGeneration == generation else { return }
@@ -477,6 +509,8 @@ final class AppState: ObservableObject {
             lastError = "Could not reach ElevenLabs."
         case .cancelled:
             return
+        case .budgetExceeded:
+            lastError = "Daily cloud budget reached — the remaining text was not sent."
         }
         flashStatus(lastError ?? "Error")
     }

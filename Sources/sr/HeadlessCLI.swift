@@ -16,8 +16,8 @@ import SRCore
 enum HeadlessCLI {
     enum Mode {
         case installKokoro
-        case speak(source: String, forceLocal: Bool)
-        case speakClipboard(forceLocal: Bool)
+        case speak(source: String, forceLocal: Bool, overrideCostControls: Bool)
+        case speakClipboard(forceLocal: Bool, overrideCostControls: Bool)
         case usage(error: String?)   // --help, or unrecognized/malformed args
 
         /// nil = no arguments at all → launch the GUI. Anything else is a CLI
@@ -27,6 +27,7 @@ enum HeadlessCLI {
             let args = Array(arguments.dropFirst())
             guard !args.isEmpty else { return nil }
             let forceLocal = args.contains("--local")
+            let overrideCostControls = args.contains("--override-cost-controls")
             if args.contains("--help") || args.contains("-h") {
                 self = .usage(error: nil)
             } else if args.contains("--install-kokoro") {
@@ -39,9 +40,14 @@ enum HeadlessCLI {
                     self = .usage(error: "--speak requires a file path or - for stdin")
                     return
                 }
-                self = .speak(source: args[i + 1], forceLocal: forceLocal)
+                self = .speak(
+                    source: args[i + 1],
+                    forceLocal: forceLocal,
+                    overrideCostControls: overrideCostControls)
             } else if args.contains("--speak-clipboard") {
-                self = .speakClipboard(forceLocal: forceLocal)
+                self = .speakClipboard(
+                    forceLocal: forceLocal,
+                    overrideCostControls: overrideCostControls)
             } else {
                 self = .usage(error: "unrecognized arguments: \(args.joined(separator: " "))")
             }
@@ -49,11 +55,13 @@ enum HeadlessCLI {
     }
 
     private static let usageText = """
-    usage: sr [--speak <file|-> | --speak-clipboard | --install-kokoro] [--local]
+    usage: sr [--speak <file|-> | --speak-clipboard | --install-kokoro] [--local] [--override-cost-controls]
       --speak <file|->    speak a file (or stdin) through the full pipeline
       --speak-clipboard   speak the clipboard (exit 2 on concealed content)
       --install-kokoro    install the local voice
       --local             force the local (Kokoro) route
+      --override-cost-controls
+                          allow a cloud read past budget/large-read gates
     Run with no arguments to launch the menu-bar app.
     """
 
@@ -68,13 +76,16 @@ enum HeadlessCLI {
             return 0
         case .installKokoro:
             return await installKokoro()
-        case .speak(let source, let forceLocal):
+        case .speak(let source, let forceLocal, let overrideCostControls):
             guard let text = readText(source) else {
                 FileHandle.standardError.write(Data("cannot read \(source)\n".utf8))
                 return 1
             }
-            return await speak(text, forceLocal: forceLocal)
-        case .speakClipboard(let forceLocal):
+            return await speak(
+                text,
+                forceLocal: forceLocal,
+                overrideCostControls: overrideCostControls)
+        case .speakClipboard(let forceLocal, let overrideCostControls):
             switch SelectionCapture.clipboardText() {
             case .concealed:
                 print("CONCEALED-REFUSED")
@@ -82,8 +93,11 @@ enum HeadlessCLI {
             case .empty, .accessibilityDenied:
                 print("clipboard empty")
                 return 1
-            case .text(let text, _):
-                return await speak(text, forceLocal: forceLocal)
+            case .text(let text, _, _):
+                return await speak(
+                    text,
+                    forceLocal: forceLocal,
+                    overrideCostControls: overrideCostControls)
             }
         }
     }
@@ -136,7 +150,11 @@ enum HeadlessCLI {
 
     // MARK: - Speak
 
-    private static func speak(_ text: String, forceLocal: Bool) async -> Int32 {
+    private static func speak(
+        _ text: String,
+        forceLocal: Bool,
+        overrideCostControls: Bool
+    ) async -> Int32 {
         // Same daemon-script freshness guarantee as the GUI (AppState.init).
         if KokoroRuntime.shared.isInstalled, let source = daemonScriptSource() {
             KokoroRuntime.shared.installer.syncDaemonScript(from: source)
@@ -166,12 +184,45 @@ enum HeadlessCLI {
                                       voiceID: settings.localVoiceID, modelID: "kokoro-82M")
             : nil
 
-        if forceLocal && local == nil {
+        let routePlan = BackendRouting.plan(
+            mode: settings.backendMode,
+            forceLocal: forceLocal,
+            localAvailable: local != nil,
+            hasCloudCredential: KeychainStore.readAPIKey() != nil)
+        if routePlan == .localUnavailable {
             print("local voice not installed")
             return 1
         }
-        let primary = forceLocal ? local! : cloud
-        let fallback = forceLocal ? nil : local
+        let primary: SynthesisPipeline.Route
+        let fallback: SynthesisPipeline.Route?
+        switch routePlan {
+        case .localOnly:
+            primary = local!
+            fallback = nil
+        case .cloudOnly:
+            primary = cloud
+            fallback = nil
+        case .cloudWithLocalFallback:
+            primary = cloud
+            fallback = local
+        case .localUnavailable:
+            return 1
+        }
+
+        let usesCloud = !primary.provider.isLocal
+        if usesCloud && !overrideCostControls {
+            if case .exceeded(let spent, let budget) = ledger.verdict() {
+                print("COST-CONTROL: daily budget reached (\(spent)/\(budget)); use --override-cost-controls to continue")
+                return 5
+            }
+            if normalized.count >= ledger.largeReadThreshold {
+                print("COST-CONTROL: large cloud read (\(normalized.count) characters); use --override-cost-controls to continue")
+                return 5
+            }
+        }
+        let cloudBudgetRemaining = usesCloud && !overrideCostControls && !ledger.overriddenToday
+            ? max(ledger.dailyBudget - ledger.spentToday, 0)
+            : nil
 
         final class ExitBox: @unchecked Sendable {
             var code: Int32 = 0
@@ -196,6 +247,7 @@ enum HeadlessCLI {
                 fallback: fallback,
                 settings: settings.voiceSettings,
                 cache: settings.cacheEnabled ? AudioCache.shared : nil,
+                cloudBudgetRemaining: cloudBudgetRemaining,
                 callbacks: .init(
                     deliver: { index, audio in playback.feed(index: index, audio: audio) },
                     billed: { billed in ledger.record(billedCharacters: billed) },
@@ -205,7 +257,7 @@ enum HeadlessCLI {
                     },
                     fellBack: { print("FELL-BACK-TO-LOCAL") },
                     failed: { error in
-                        print("SYNTHESIS-FAILED: \(error)")
+                        print("SYNTHESIS-FAILED: \(safeMessage(for: error))")
                         // Stop the remaining chunks too — they'd keep
                         // synthesizing (and billing, on cloud routes) through
                         // the janitor drain window below otherwise.
@@ -232,5 +284,17 @@ enum HeadlessCLI {
         }
         await KokoroRuntime.shared.supervisor.stop()
         return box.code
+    }
+
+    private static func safeMessage(for error: TTSError) -> String {
+        switch error {
+        case .missingAPIKey: return "missing ElevenLabs API key"
+        case .http(let status, _): return "provider HTTP \(status)"
+        case .network(let detail) where detail.hasPrefix("kokoro"):
+            return "local voice unavailable"
+        case .network: return "provider network error"
+        case .budgetExceeded: return "daily cloud budget reached"
+        case .cancelled: return "cancelled"
+        }
     }
 }

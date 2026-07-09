@@ -141,6 +141,14 @@ public struct ElevenLabsProvider: TTSProvider {
             throw TTSError.http(status: http.statusCode, body: body)
         }
 
+        guard AudioPayloadValidator.isMP3(data) else {
+            SRLog.error("elevenlabs.invalid_audio", [
+                "bytes": String(data.count),
+                "content_type": http.value(forHTTPHeaderField: "Content-Type") ?? "missing",
+            ])
+            throw TTSError.http(status: 502, body: "provider returned invalid audio")
+        }
+
         let historyID = http.value(forHTTPHeaderField: "history-item-id")
         let billed = http.value(forHTTPHeaderField: "character-cost").flatMap(Int.init)
         SRLog.event("elevenlabs.ok", [

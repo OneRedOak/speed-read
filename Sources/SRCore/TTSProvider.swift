@@ -52,6 +52,7 @@ public enum TTSError: Error, Sendable {
     case missingAPIKey
     case http(status: Int, body: String?)
     case network(underlying: String)
+    case budgetExceeded
     case cancelled
 
     /// Errors that should trigger cloud→local fallback in Auto mode.
@@ -60,7 +61,7 @@ public enum TTSError: Error, Sendable {
         case .http(let status, _): return status == 429 || status >= 500
         case .network: return true
         case .missingAPIKey: return true
-        case .cancelled: return false
+        case .budgetExceeded, .cancelled: return false
         }
     }
 }

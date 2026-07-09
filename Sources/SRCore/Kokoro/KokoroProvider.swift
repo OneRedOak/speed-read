@@ -138,8 +138,9 @@ public struct KokoroProvider: TTSProvider {
                 // Client owns the temp dir (see daemon protocol doc).
                 try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
             }
-            guard let audio = try? Data(contentsOf: url), !audio.isEmpty else {
-                throw TTSError.http(status: 500, body: "kokoro: empty audio file")
+            guard let audio = try? Data(contentsOf: url),
+                  AudioPayloadValidator.isWAV(audio) else {
+                throw TTSError.http(status: 500, body: "kokoro: invalid audio file")
             }
             SRLog.event("kokoro.ok", [
                 "chars": String(text.count),

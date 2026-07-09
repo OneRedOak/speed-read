@@ -32,6 +32,7 @@ final class SynthesisPipeline: @unchecked Sendable {
     }
 
     private var task: Task<Void, Never>?
+    private var flights: SynthesisSingleFlight?
 
     func run(
         chunks: [Chunk],
@@ -39,33 +40,71 @@ final class SynthesisPipeline: @unchecked Sendable {
         fallback: Route?,
         settings: VoiceSettings,
         cache: AudioCache?,
+        cloudBudgetRemaining: Int? = nil,
         callbacks: Callbacks
     ) {
         cancel()
         let errorFlag = OnceFlag()
         let fallbackFlag = OnceFlag()
         let useFallback = AtomicBool()
+        let budget = AtomicBudget(remaining: cloudBudgetRemaining)
+        let flights = SynthesisSingleFlight()
+        self.flights = flights
+
+        @Sendable func cacheKey(_ route: Route, _ chunk: Chunk) -> String {
+            AudioCache.key(text: chunk.text, provider: route.provider.id,
+                           voiceID: route.voiceID, modelID: route.modelID,
+                           settings: settings)
+        }
+
+        @Sendable func synthesizeOn(_ route: Route, chunk: Chunk) async throws -> Data {
+            let key = cacheKey(route, chunk)
+            if let cached = cache?.lookup(key) { return cached }
+
+            return try await flights.value(for: key) {
+                // A sibling may have filled the cache while this task waited
+                // for ownership of the single-flight operation.
+                if let cached = cache?.lookup(key) { return cached }
+
+                let reservation: Int?
+                if route.provider.isLocal {
+                    reservation = nil
+                } else {
+                    guard let claimed = budget.claim(chunk.text.count) else {
+                        throw TTSError.budgetExceeded
+                    }
+                    reservation = claimed
+                }
+
+                let result: SynthesisResult
+                do {
+                    result = try await route.provider.synthesize(
+                        text: chunk.text, voiceID: route.voiceID, settings: settings)
+                } catch {
+                    if let reservation { budget.release(reservation) }
+                    throw error
+                }
+
+                if let reservation {
+                    // Missing billing headers must fail closed for budgeting:
+                    // one credit per input character is the conservative bound.
+                    let billed = max(result.billedCharacters ?? chunk.text.count, 0)
+                    budget.settle(reservation: reservation, actual: billed)
+                    callbacks.billed(billed)
+                }
+                if let historyID = result.remoteHistoryItemID {
+                    callbacks.historyID(historyID)
+                }
+                cache?.store(key, data: result.audio)
+                return result.audio
+            }
+        }
 
         @Sendable func synthesize(_ chunk: Chunk) async throws -> Void {
             var route = useFallback.value ? (fallback ?? primary) : primary
-
-            func cacheKey(_ r: Route) -> String {
-                AudioCache.key(text: chunk.text, provider: r.provider.id,
-                               voiceID: r.voiceID, modelID: r.modelID,
-                               settings: settings)
-            }
-
-            // Cache first (C-4): zero credits, instant.
-            if let cached = cache?.lookup(cacheKey(route)) {
-                guard !Task.isCancelled else { return }
-                await callbacks.deliver(chunk.id, cached)
-                return
-            }
-
-            var result: SynthesisResult
+            let audio: Data
             do {
-                result = try await route.provider.synthesize(
-                    text: chunk.text, voiceID: route.voiceID, settings: settings)
+                audio = try await synthesizeOn(route, chunk: chunk)
             } catch let error as TTSError where error.isFallbackTrigger && fallback != nil && !route.provider.isLocal {
                 // Flip to fallback for this and all subsequent chunks (T-7).
                 useFallback.set(true)
@@ -74,20 +113,11 @@ final class SynthesisPipeline: @unchecked Sendable {
                     await MainActor.run { callbacks.fellBack() }
                 }
                 route = fallback!
-                if let cached = cache?.lookup(cacheKey(route)) {
-                    guard !Task.isCancelled else { return }
-                    await callbacks.deliver(chunk.id, cached)
-                    return
-                }
-                result = try await route.provider.synthesize(
-                    text: chunk.text, voiceID: route.voiceID, settings: settings)
+                audio = try await synthesizeOn(route, chunk: chunk)
             }
 
-            if let billed = result.billedCharacters { callbacks.billed(billed) }
-            if let historyID = result.remoteHistoryItemID { callbacks.historyID(historyID) }
-            cache?.store(cacheKey(route), data: result.audio)
             guard !Task.isCancelled else { return }
-            await callbacks.deliver(chunk.id, result.audio)
+            await callbacks.deliver(chunk.id, audio)
         }
 
         task = Task {
@@ -141,6 +171,8 @@ final class SynthesisPipeline: @unchecked Sendable {
     }
 
     func cancel() {
+        flights?.cancelAll()
+        flights = nil
         task?.cancel()
         task = nil
     }
@@ -178,10 +210,86 @@ private final class AtomicBool: @unchecked Sendable {
     }
 }
 
+/// Per-run conservative cloud-credit reservations. Reserving before a request
+/// prevents the three concurrent workers from collectively crossing the cap.
+private final class AtomicBudget: @unchecked Sendable {
+    private var remaining: Int?
+    private let lock = NSLock()
+
+    init(remaining: Int?) {
+        self.remaining = remaining.map { max($0, 0) }
+    }
+
+    func claim(_ amount: Int) -> Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        let amount = max(amount, 0)
+        guard let available = remaining else { return amount }
+        guard amount <= available else { return nil }
+        remaining = available - amount
+        return amount
+    }
+
+    func release(_ reservation: Int) {
+        lock.lock()
+        if let available = remaining { remaining = available + reservation }
+        lock.unlock()
+    }
+
+    func settle(reservation: Int, actual: Int) {
+        lock.lock()
+        if let available = remaining {
+            remaining = available + reservation - actual
+        }
+        lock.unlock()
+    }
+}
+
+/// Deduplicates identical in-flight cache misses. Side effects live inside the
+/// owner operation, so billing/history callbacks run exactly once.
+private final class SynthesisSingleFlight: @unchecked Sendable {
+    private struct Entry {
+        let id: UUID
+        let task: Task<Data, Error>
+    }
+
+    private let lock = NSLock()
+    private var entries: [String: Entry] = [:]
+
+    func value(
+        for key: String,
+        operation: @escaping @Sendable () async throws -> Data
+    ) async throws -> Data {
+        let entry: Entry = lock.withLock {
+            if let existing = entries[key] { return existing }
+            let created = Entry(id: UUID(), task: Task { try await operation() })
+            entries[key] = created
+            return created
+        }
+        defer {
+            lock.withLock {
+                if entries[key]?.id == entry.id { entries[key] = nil }
+            }
+        }
+        return try await entry.task.value
+    }
+
+    func cancelAll() {
+        let tasks: [Task<Data, Error>] = lock.withLock {
+            let tasks = entries.values.map(\.task)
+            entries.removeAll()
+            return tasks
+        }
+        for task in tasks { task.cancel() }
+    }
+}
+
 extension TTSError: Equatable {
     public static func == (lhs: TTSError, rhs: TTSError) -> Bool {
         switch (lhs, rhs) {
-        case (.missingAPIKey, .missingAPIKey), (.cancelled, .cancelled):
+        case (.missingAPIKey, .missingAPIKey),
+             (.budgetExceeded, .budgetExceeded),
+             (.cancelled, .cancelled):
             return true
         case (.http(let a, _), .http(let b, _)):
             return a == b

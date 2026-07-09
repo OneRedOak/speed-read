@@ -71,6 +71,19 @@ import Testing
     }
 }
 
+@Suite struct AudioPayloadValidatorTests {
+    @Test func recognizesMP3Headers() {
+        #expect(AudioPayloadValidator.isMP3(Data([0x49, 0x44, 0x33, 0x04])))
+        #expect(AudioPayloadValidator.isMP3(Data([0xFF, 0xFB, 0x90, 0x64])))
+        #expect(!AudioPayloadValidator.isMP3(Data("not audio".utf8)))
+    }
+
+    @Test func recognizesWAVContainer() {
+        #expect(AudioPayloadValidator.isWAV(Data("RIFF1234WAVEdata".utf8)))
+        #expect(!AudioPayloadValidator.isWAV(Data("RIFF1234NOPEdata".utf8)))
+    }
+}
+
 @Suite struct CostLedgerTests {
     private func freshLedger() -> CostLedger {
         let defaults = UserDefaults(suiteName: "sr-tests-\(UUID().uuidString)")!
