@@ -18,7 +18,9 @@ public struct KokoroInstaller: Sendable {
         "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
     /// Python interpreter for the venv (uv downloads a standalone build
     /// if the system lacks it — deterministic across machines).
-    public static let pythonVersion = "3.12"
+    public static let pythonVersion = "3.12.11"
+    public static let requirementsLockSHA256 =
+        "6af297636c93bca9fec1dc5fd1d8cbba9bedba962e158ce08b11600363c7f0b1"
     /// huggingface.co model repo + immutable revision (main @ pin time).
     public static let modelRepo = "mlx-community/Kokoro-82M-bf16"
     public static let modelRevision = "a71e4d38b236d968966a2002c4c895dbd12b1c3c"
@@ -45,6 +47,7 @@ public struct KokoroInstaller: Sendable {
         public let modelRevision: String
         public let weightsSHA256: String
         public let configSHA256: String
+        public let requirementsLockSHA256: String
         public let snapshotPath: String
         public let installedAt: Date
     }
@@ -77,7 +80,8 @@ public struct KokoroInstaller: Sendable {
               manifest.modelRepo == Self.modelRepo,
               manifest.modelRevision == Self.modelRevision,
               manifest.weightsSHA256 == Self.weightsSHA256,
-              manifest.configSHA256 == Self.configSHA256 else {
+              manifest.configSHA256 == Self.configSHA256,
+              manifest.requirementsLockSHA256 == Self.requirementsLockSHA256 else {
             throw InstallError(message: "installed manifest does not match bundled pins")
         }
         var isDirectory: ObjCBool = false
@@ -127,11 +131,16 @@ public struct KokoroInstaller: Sendable {
 
     /// Run the full install. `daemonSourceURL` is the sr_tts_server.py to
     /// copy in (from the app bundle's resources or the repo's daemon/ dir).
-    public func install(daemonSourceURL: URL) -> AsyncStream<InstallProgress> {
+    public func install(
+        daemonSourceURL: URL,
+        requirementsLockURL: URL
+    ) -> AsyncStream<InstallProgress> {
         AsyncStream { continuation in
             let task = Task.detached(priority: .userInitiated) {
                 do {
-                    try await runInstall(daemonSourceURL: daemonSourceURL) {
+                    try await runInstall(
+                        daemonSourceURL: daemonSourceURL,
+                        requirementsLockURL: requirementsLockURL) {
                         continuation.yield($0)
                     }
                     continuation.yield(.done)
@@ -155,6 +164,7 @@ public struct KokoroInstaller: Sendable {
 
     private func runInstall(
         daemonSourceURL: URL,
+        requirementsLockURL: URL,
         progress: @Sendable (InstallProgress) -> Void
     ) async throws {
         let fm = FileManager.default
@@ -170,19 +180,18 @@ public struct KokoroInstaller: Sendable {
         try await run(uv, ["venv", "--python", Self.pythonVersion, paths.venvDir.path])
         try Task.checkCancellation()
 
-        // 2. pinned mlx-audio + misaki (misaki is optional upstream but
-        // required for Kokoro English synthesis)
-        // TODO(P-12 follow-up): only top-level versions are pinned here —
-        // transitive deps and the spaCy wheel are not hash-verified. Proper
-        // fix: ship a `uv pip compile --generate-hashes` lockfile and install
-        // with --require-hashes.
+        // 2. Fully resolved + hashed dependency closure. Refuse a modified
+        // bundled lock before letting uv execute any package code.
         progress(.installingPackages)
+        let lockHash = try Self.sha256(of: requirementsLockURL)
+        guard lockHash == Self.requirementsLockSHA256 else {
+            throw InstallError(message: "requirements lock checksum mismatch")
+        }
         try await run(uv, [
             "pip", "install",
             "--python", paths.venvPython.path,
-            "mlx-audio==\(Self.mlxAudioVersion)",
-            "misaki[en]==\(Self.misakiVersion)",
-            Self.spacyModelWheel,
+            "--require-hashes",
+            "--requirements", requirementsLockURL.path,
         ], timeout: 900)
 
         try Task.checkCancellation()
@@ -233,6 +242,7 @@ public struct KokoroInstaller: Sendable {
             modelRevision: Self.modelRevision,
             weightsSHA256: weightsHash,
             configSHA256: configHash,
+            requirementsLockSHA256: lockHash,
             snapshotPath: snapshotPath,
             installedAt: Date()
         )

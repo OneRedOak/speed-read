@@ -25,6 +25,7 @@ done
 
 # Kokoro daemon script — installed into App Support by the in-app installer.
 cp daemon/sr_tts_server.py "$BUNDLE_DIR/Contents/Resources/"
+cp daemon/requirements.lock "$BUNDLE_DIR/Contents/Resources/kokoro-requirements.lock"
 
 cat > "$BUNDLE_DIR/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

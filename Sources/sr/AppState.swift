@@ -476,8 +476,9 @@ final class AppState: ObservableObject {
 
     func installKokoro() {
         guard kokoroInstallStatus == nil else { return }
-        guard let source = daemonScriptSource() else {
-            lastError = "Daemon script not found in app bundle."
+        guard let source = daemonScriptSource(),
+              let requirementsLock = requirementsLockSource() else {
+            lastError = "Local voice installer resources are missing from the app bundle."
             flashStatus(lastError!)
             return
         }
@@ -486,7 +487,9 @@ final class AppState: ObservableObject {
         // lives for the app's lifetime.
         installTask = Task { [self] in
             defer { installTask = nil }
-            for await progress in KokoroRuntime.shared.installer.install(daemonSourceURL: source) {
+            for await progress in KokoroRuntime.shared.installer.install(
+                daemonSourceURL: source,
+                requirementsLockURL: requirementsLock) {
                 switch progress {
                 case .creatingVenv: kokoroInstallStatus = "Creating Python environment…"
                 case .installingPackages: kokoroInstallStatus = "Installing mlx-audio…"
@@ -512,6 +515,16 @@ final class AppState: ObservableObject {
         // Dev fallback: running from the repo via `swift run`.
         let dev = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("daemon/sr_tts_server.py")
+        return FileManager.default.fileExists(atPath: dev.path) ? dev : nil
+    }
+
+    private func requirementsLockSource() -> URL? {
+        if let bundled = Bundle.main.url(
+            forResource: "kokoro-requirements", withExtension: "lock") {
+            return bundled
+        }
+        let dev = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("daemon/requirements.lock")
         return FileManager.default.fileExists(atPath: dev.path) ? dev : nil
     }
 

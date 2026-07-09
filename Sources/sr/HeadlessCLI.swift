@@ -113,15 +113,18 @@ enum HeadlessCLI {
     // MARK: - Install
 
     private static func installKokoro() async -> Int32 {
-        guard let source = daemonScriptSource() else {
-            print("daemon script not found (looked in bundle + ./daemon/)")
+        guard let source = daemonScriptSource(),
+              let requirementsLock = requirementsLockSource() else {
+            print("local installer resources not found (looked in bundle + ./daemon/)")
             return 1
         }
         if KokoroRuntime.shared.isInstalled {
             print("already installed")
             return 0
         }
-        for await progress in KokoroRuntime.shared.installer.install(daemonSourceURL: source) {
+        for await progress in KokoroRuntime.shared.installer.install(
+            daemonSourceURL: source,
+            requirementsLockURL: requirementsLock) {
             switch progress {
             case .creatingVenv: print("[1/4] creating Python venv…")
             case .installingPackages: print("[2/4] installing pinned mlx-audio…")
@@ -145,6 +148,16 @@ enum HeadlessCLI {
         }
         let dev = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("daemon/sr_tts_server.py")
+        return FileManager.default.fileExists(atPath: dev.path) ? dev : nil
+    }
+
+    private static func requirementsLockSource() -> URL? {
+        if let bundled = Bundle.main.url(
+            forResource: "kokoro-requirements", withExtension: "lock") {
+            return bundled
+        }
+        let dev = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("daemon/requirements.lock")
         return FileManager.default.fileExists(atPath: dev.path) ? dev : nil
     }
 

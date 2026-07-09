@@ -31,6 +31,7 @@ enum KokoroTestSupport {
             modelRevision: KokoroInstaller.modelRevision,
             weightsSHA256: KokoroInstaller.weightsSHA256,
             configSHA256: KokoroInstaller.configSHA256,
+            requirementsLockSHA256: KokoroInstaller.requirementsLockSHA256,
             snapshotPath: "/nonexistent",
             installedAt: Date(timeIntervalSince1970: 1_780_000_000)
         )
