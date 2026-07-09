@@ -37,12 +37,6 @@ public enum SRLog {
         appendToFile("ERROR \(name)\(joined)")
     }
 
-    private static let stamp: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
-
     private static func appendToFile(_ line: String) {
         queue.async {
             let url = logFileURL
@@ -59,7 +53,7 @@ public enum SRLog {
                 try? fm.removeItem(at: rotated)
                 try? fm.moveItem(at: url, to: rotated)
             }
-            let entry = "\(stamp.string(from: Date())) \(line)\n"
+            let entry = "\(Date().ISO8601Format(.init(includingFractionalSeconds: true))) \(line)\n"
             // O_APPEND: GUI and CLI share this file; seekToEnd+write from two
             // processes interleaves at the same offset and loses lines.
             // Kernel-atomic appends don't.

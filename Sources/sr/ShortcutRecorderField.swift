@@ -1,5 +1,5 @@
 import AppKit
-import KeyboardShortcuts
+@preconcurrency import KeyboardShortcuts
 import SwiftUI
 
 /// Minimal shortcut recorder that receives keys through the ordinary

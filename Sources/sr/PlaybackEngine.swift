@@ -2,6 +2,10 @@
 import Foundation
 import SRCore
 
+private final class ConverterInputState: @unchecked Sendable {
+    var fed = false
+}
+
 /// Timeline audio player with time-domain speed control and seeking
 /// (F-7, F-8).
 ///
@@ -542,14 +546,14 @@ final class PlaybackEngine: ObservableObject {
         let ratio = target.sampleRate / buffer.format.sampleRate
         let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024
         guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return nil }
-        var fed = false
+        let inputState = ConverterInputState()
         var error: NSError?
         converter.convert(to: out, error: &error) { _, status in
-            if fed {
+            if inputState.fed {
                 status.pointee = .endOfStream
                 return nil
             }
-            fed = true
+            inputState.fed = true
             status.pointee = .haveData
             return buffer
         }

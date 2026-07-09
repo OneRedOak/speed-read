@@ -1,10 +1,11 @@
 import AppKit
 import Combine
 import Foundation
-import KeyboardShortcuts
+@preconcurrency import KeyboardShortcuts
 import SRCore
 import SwiftUI
 
+@MainActor
 extension KeyboardShortcuts.Name {
     /// ⌥⇧/ — speak selection, or stop if speaking (F-1, F-2).
     static let speakOrStop = Self("speakOrStop",
@@ -601,8 +602,7 @@ final class AppState: ObservableObject {
     // MARK: - Accessibility onboarding
 
     func promptForAccessibility() {
-        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+        AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
         // Poll until granted so the UI banner clears without a relaunch.
         Task { @MainActor [weak self] in
             while !AXIsProcessTrusted() {

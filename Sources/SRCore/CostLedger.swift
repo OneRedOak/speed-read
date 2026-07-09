@@ -4,7 +4,9 @@ import Foundation
 ///
 /// Spend is recorded from the ElevenLabs `character-cost` response header
 /// (exact billed credits, live-verified) — not estimated from input length.
-public struct CostLedger {
+/// `UserDefaults` supports concurrent reads/writes, while the only compound
+/// mutation (`record`) is serialized by `recordLock`.
+public struct CostLedger: @unchecked Sendable {
     private let defaults: UserDefaults
 
     public init(defaults: UserDefaults = .standard) {
