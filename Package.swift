@@ -30,5 +30,10 @@ let package = Package(
             path: "Tests/SRCoreTests",
             resources: [.copy("fixtures")]
         ),
+        .testTarget(
+            name: "SRAppTests",
+            dependencies: ["sr"],
+            path: "Tests/SRAppTests"
+        ),
     ]
 )
