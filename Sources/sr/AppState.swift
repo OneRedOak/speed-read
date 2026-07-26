@@ -258,7 +258,7 @@ final class AppState: ObservableObject {
         let kokoroReady = KokoroRuntime.shared.isInstalled
 
         let localRoute = SynthesisPipeline.Route(
-            provider: KokoroProvider(), voiceID: localVoiceID, modelID: "kokoro-82M")
+            provider: KokoroProvider(), voiceID: localVoiceID, modelID: KokoroProvider.cacheModelID)
         let cloudRoute = SynthesisPipeline.Route(
             provider: ElevenLabsProvider(modelID: modelID), voiceID: voiceID, modelID: modelID)
 
@@ -449,7 +449,7 @@ final class AppState: ObservableObject {
             return nil
         }
         return SynthesisPipeline.Route(
-            provider: KokoroProvider(), voiceID: localVoiceID, modelID: "kokoro-82M")
+            provider: KokoroProvider(), voiceID: localVoiceID, modelID: KokoroProvider.cacheModelID)
     }
 
     // MARK: - Dialogs (C-2 / C-3)

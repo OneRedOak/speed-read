@@ -205,7 +205,8 @@ enum HeadlessCLI {
             voiceID: settings.voiceID, modelID: settings.modelID)
         let local: SynthesisPipeline.Route? = KokoroRuntime.shared.isInstalled
             ? SynthesisPipeline.Route(provider: KokoroProvider(),
-                                      voiceID: settings.localVoiceID, modelID: "kokoro-82M")
+                                      voiceID: settings.localVoiceID,
+                                      modelID: KokoroProvider.cacheModelID)
             : nil
 
         let routePlan = BackendRouting.plan(

@@ -31,6 +31,12 @@ public struct KokoroProvider: TTSProvider {
     public let id = "kokoro"
     public let isLocal = true
 
+    /// Cache-key model identifier (there is no user-selectable local model).
+    /// The "-t1" suffix marks the daemon's edge-silence trimming; bump it
+    /// whenever daemon synthesis output changes, so cached audio rendered
+    /// by an older daemon is never replayed.
+    public static let cacheModelID = "kokoro-82M-t1"
+
     /// Curated English subset (from the reference; full list in the model's
     /// VOICES.md). First letter encodes language: a=US, b=British.
     public static let presetVoices: [Voice] = [

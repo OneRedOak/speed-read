@@ -34,6 +34,51 @@ class RequestReaderTests(unittest.TestCase):
         self.assertEqual(server._read_request_line(conn), b'{"token":"a"}')
 
 
+@unittest.skipUnless(
+    importlib.util.find_spec("numpy"), "numpy not installed"
+)
+class TrimEdgeSilenceTests(unittest.TestCase):
+    SAMPLE_RATE = 24000
+
+    def _segment(self, lead_s, speech_s, trail_s):
+        import numpy as np
+
+        lead = np.zeros(int(lead_s * self.SAMPLE_RATE), dtype=np.float32)
+        speech = np.full(int(speech_s * self.SAMPLE_RATE), 0.5, dtype=np.float32)
+        trail = np.zeros(int(trail_s * self.SAMPLE_RATE), dtype=np.float32)
+        return np.concatenate([lead, speech, trail])
+
+    def test_trims_edges_keeping_pad(self):
+        audio = self._segment(0.4, 1.0, 0.6)
+        trimmed = server._trim_edge_silence(audio, self.SAMPLE_RATE)
+        expected = (1.0 + 2 * server.TRIM_PAD_SECONDS) * self.SAMPLE_RATE
+        self.assertAlmostEqual(trimmed.size, expected, delta=2)
+
+    def test_short_edges_left_alone(self):
+        audio = self._segment(0.02, 1.0, 0.02)
+        trimmed = server._trim_edge_silence(audio, self.SAMPLE_RATE)
+        self.assertEqual(trimmed.size, audio.size)
+
+    def test_all_silent_segment_untouched(self):
+        import numpy as np
+
+        audio = np.zeros(6000, dtype=np.float32)
+        trimmed = server._trim_edge_silence(audio, self.SAMPLE_RATE)
+        self.assertEqual(trimmed.size, 6000)
+
+    def test_empty_segment_untouched(self):
+        import numpy as np
+
+        audio = np.zeros(0, dtype=np.float32)
+        self.assertEqual(server._trim_edge_silence(audio, self.SAMPLE_RATE).size, 0)
+
+    def test_quiet_speech_trims_relative_to_peak(self):
+        audio = self._segment(0.4, 1.0, 0.6) * 0.01
+        trimmed = server._trim_edge_silence(audio, self.SAMPLE_RATE)
+        expected = (1.0 + 2 * server.TRIM_PAD_SECONDS) * self.SAMPLE_RATE
+        self.assertAlmostEqual(trimmed.size, expected, delta=2)
+
+
 class IdleWatchdogTests(unittest.TestCase):
     def test_active_client_blocks_idle_exit(self):
         original_time = server.last_request_time

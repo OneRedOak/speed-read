@@ -58,6 +58,15 @@ MODEL_PATH = os.environ.get("SR_MODEL_PATH", "")
 # orders of magnitude above any legitimate request line.
 MAX_REQUEST_BYTES = 1_000_000
 
+# Kokoro bakes ~0.4 s of leading and ~0.6 s of trailing silence into every
+# generated segment (stacking when text is split into multiple segments).
+# The client adds its own configured inter-sentence pause on top, so baked-in
+# edge silence is pure dead air between sentences at any playback rate.
+# Trim thresholds: sample counts as silent below this fraction of the
+# segment's peak amplitude; a short natural pad is kept at each edge.
+TRIM_THRESHOLD_RATIO = 0.005
+TRIM_PAD_SECONDS = 0.06
+
 # Idle timeout in seconds (non-managed mode).
 IDLE_TIMEOUT = int(os.environ.get("SR_IDLE_TIMEOUT", "300"))
 
@@ -187,6 +196,29 @@ def _generate_segments(text, voice, speed, lang_code, cancel_check, depth=0):
         return [(np.zeros(6000, dtype=np.float32), 24000)]
 
 
+def _trim_edge_silence(audio, sample_rate):
+    """Trim leading/trailing silence from one generated segment.
+
+    Keeps TRIM_PAD_SECONDS of natural padding at each edge. All-silent
+    segments (the broadcast_shapes last-resort beat) pass through untouched
+    — they are deliberate placeholders, not model padding.
+    """
+    import numpy as np
+
+    if audio.size == 0:
+        return audio
+    threshold = np.abs(audio).max() * TRIM_THRESHOLD_RATIO
+    if threshold <= 0:
+        return audio
+    voiced = np.flatnonzero(np.abs(audio) > threshold)
+    if voiced.size == 0:
+        return audio
+    pad = int(TRIM_PAD_SECONDS * sample_rate)
+    start = max(int(voiced[0]) - pad, 0)
+    end = min(int(voiced[-1]) + 1 + pad, audio.size)
+    return audio[start:end]
+
+
 def generate_audio(text, voice, speed, lang_code, cancel_check=None):
     """Generate a WAV file from text. Returns the file path.
 
@@ -202,7 +234,7 @@ def generate_audio(text, voice, speed, lang_code, cancel_check=None):
 
     try:
         pairs = _generate_segments(text, voice, speed, lang_code, cancel_check)
-        segments = [audio for audio, _ in pairs]
+        segments = [_trim_edge_silence(audio, rate) for audio, rate in pairs]
         sample_rate = pairs[-1][1] if pairs else None
 
         if not segments or sample_rate is None:

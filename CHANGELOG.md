@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Fixed jarring pauses between sentences on the local voice at faster playback
+  rates: Kokoro bakes ~0.4 s leading / ~0.6 s trailing silence into every
+  generated segment, so each boundary carried ~1 s of dead air on top of the
+  configured sentence pause. The daemon now trims edge silence per segment
+  (keeping a 60 ms natural pad), and the local cache key was bumped so
+  previously cached untrimmed audio is re-synthesized.
+
 - Audit hardening: unified GUI/CLI backend routing so Local never reaches the
   cloud and Cloud never silently falls back; added AX protected-content and
   delayed-copy clipboard safeguards; enforced per-chunk cloud budgets and a
