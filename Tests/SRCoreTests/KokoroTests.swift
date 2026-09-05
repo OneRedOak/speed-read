@@ -34,8 +34,16 @@ import Testing
 
     @Test func responseParsesOK() throws {
         let response = try KokoroWire.decodeResponse(
-            #"{"status": "ok", "audio_file": "/tmp/gen_x/out.wav"}"#)
+            #"{"status": "ok", "audio_file": "/tmp/gen_x/out.wav", "output_version": "kokoro-82M-t2"}"#)
         #expect(response == .ok(audioFile: "/tmp/gen_x/out.wav"))
+    }
+
+    @Test(arguments: [
+        #"{"status":"ok","audio_file":"/tmp/gen_x/out.wav"}"#,
+        #"{"status":"ok","audio_file":"/tmp/gen_x/out.wav","output_version":"kokoro-82M-t1"}"#,
+    ])
+    func legacyDaemonCannotProduceCacheableAudio(_ line: String) throws {
+        #expect(try KokoroWire.decodeResponse(line) == .incompatible(audioFile: "/tmp/gen_x/out.wav"))
     }
 
     @Test func responseParsesError() throws {

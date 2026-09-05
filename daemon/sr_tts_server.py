@@ -48,6 +48,8 @@ LOG_DIR = os.path.expanduser("~/Library/Logs/sr")
 LOG_FILE = os.path.join(LOG_DIR, "kokoro.log")
 
 MODEL_ID = "mlx-community/Kokoro-82M-bf16"
+# Must match the client cache namespace: old processes may outlive an update.
+OUTPUT_VERSION = "kokoro-82M-t2"
 
 # Verified local snapshot (P-12): the supervisor passes the installer's
 # hash-verified snapshot directory so the daemon runs exactly the bytes
@@ -188,20 +190,17 @@ def _generate_segments(text, voice, speed, lang_code, cancel_check, depth=0):
             except ValueError as e2:
                 if "broadcast_shapes" not in str(e2):
                     raise
-        # Last resort: skip this fragment with a beat of silence rather than
-        # failing the entire read. Kokoro outputs 24 kHz mono.
-        import numpy as np
-
-        log(f"broadcast_shapes workaround exhausted: skipping text_len={len(text)}")
-        return [(np.zeros(6000, dtype=np.float32), 24000)]
+        # Never report success (and cache incomplete audio) when a fragment
+        # could not be spoken. The client will surface the failure to the user.
+        log(f"broadcast_shapes workaround exhausted: text_len={len(text)}")
+        raise RuntimeError("local synthesis workaround exhausted") from None
 
 
 def _trim_edge_silence(audio, sample_rate):
     """Trim leading/trailing silence from one generated segment.
 
     Keeps TRIM_PAD_SECONDS of natural padding at each edge. All-silent
-    segments (the broadcast_shapes last-resort beat) pass through untouched
-    — they are deliberate placeholders, not model padding.
+    segments pass through untouched because they have no speech boundary.
     """
     import numpy as np
 
@@ -375,7 +374,7 @@ def handle_client(conn):
         # Size before send: once the response is out, the client owns the
         # temp dir and may delete it before we could stat it.
         audio_bytes = os.path.getsize(audio_file)
-        send({"status": "ok", "audio_file": audio_file})
+        send({"status": "ok", "audio_file": audio_file, "output_version": OUTPUT_VERSION})
         log(f"response: ok bytes={audio_bytes}")
 
     except CancelledError:

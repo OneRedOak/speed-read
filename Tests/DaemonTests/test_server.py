@@ -98,5 +98,55 @@ class IdleWatchdogTests(unittest.TestCase):
             server.active_clients = original_active
 
 
+class OutputVersionTests(unittest.TestCase):
+    def test_successful_response_identifies_live_output_semantics(self):
+        import json
+        import tempfile
+        from unittest.mock import patch, Mock
+
+        conn = Mock()
+        request = json.dumps({"token": "test", "text": "test", "voice": "bf_lily"}).encode()
+        with tempfile.NamedTemporaryFile() as audio:
+            audio.write(b"audio")
+            audio.flush()
+            with patch.object(server, "AUTH_TOKEN", "test"), \
+                    patch.object(server, "_read_request_line", return_value=request), \
+                    patch.object(server, "_client_gone", return_value=False), \
+                    patch.object(server, "generate_audio", return_value=audio.name), \
+                    patch.object(server, "_release_model_scratch"), patch.object(server, "log"):
+                server.handle_client(conn)
+        response = json.loads(conn.sendall.call_args.args[0])
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["output_version"], "kokoro-82M-t2")
+
+
+class GenerationFailureTests(unittest.TestCase):
+    def test_exhausted_workarounds_fail_instead_of_returning_silence(self):
+        import sys
+        from unittest.mock import patch, Mock
+
+        model = Mock()
+        model.generate.side_effect = ValueError("[broadcast_shapes] secret text")
+        # This path must raise before any array operations, so it can be
+        # verified without downloading numpy or the actual voice model.
+        with patch.object(server, "model", model), patch.object(server, "log"), \
+                patch.dict(sys.modules, {"numpy": Mock()}):
+            with self.assertRaisesRegex(RuntimeError, "^local synthesis workaround exhausted$"):
+                server._generate_segments("fragment", "bf_lily", 1, "b", None)
+        self.assertEqual(model.generate.call_count, 4)
+
+    def test_unrelated_model_errors_are_not_retried(self):
+        import sys
+        from unittest.mock import patch, Mock
+
+        model = Mock()
+        model.generate.side_effect = ValueError("unrelated")
+        with patch.object(server, "model", model), \
+                patch.dict(sys.modules, {"numpy": Mock()}):
+            with self.assertRaises(ValueError):
+                server._generate_segments("fragment", "bf_lily", 1, "b", None)
+        self.assertEqual(model.generate.call_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

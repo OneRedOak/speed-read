@@ -597,6 +597,8 @@ final class AppState: ObservableObject {
             lastError = "Synthesis error (HTTP \(status))."
         case .invalidAudio:
             lastError = "ElevenLabs returned invalid audio; the read was stopped."
+        case .network("kokoro: incompatible daemon"):
+            lastError = "Local voice needs a restart — quit all sr instances, then reopen sr."
         case .network(let detail) where detail.hasPrefix("kokoro"):
             lastError = "Local voice unavailable."
         case .network:
