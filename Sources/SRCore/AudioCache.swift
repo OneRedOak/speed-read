@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Darwin
 
 /// Content-addressed audio cache (P-10, F-9, C-4).
 ///
@@ -36,7 +37,7 @@ public final class AudioCache: @unchecked Sendable {
         get { stateLock.withLock { _enabled } }
         set {
             stateLock.withLock {
-                _enabled = newValue
+                _enabled = newValue && privateDirectoryReady
                 if !newValue { pendingWrites.removeAll() }
             }
             // A writer may already have copied its payload out of
@@ -48,6 +49,7 @@ public final class AudioCache: @unchecked Sendable {
         }
     }
 
+    private var privateDirectoryReady = false
     private let directory: URL
     private let queue = DispatchQueue(label: "com.patrickellis.sr.cache", qos: .utility)
     private let queueKey = DispatchSpecificKey<UInt8>()
@@ -84,8 +86,32 @@ public final class AudioCache: @unchecked Sendable {
         self.evictionDebounce = evictionDebounce
         self.beforeDiskWrite = beforeDiskWrite
         queue.setSpecific(key: queueKey, value: 1)
-        try? FileManager.default.createDirectory(at: self.directory,
-                                                 withIntermediateDirectories: true)
+        do {
+            let fm = FileManager.default
+            try fm.createDirectory(at: self.directory, withIntermediateDirectories: true,
+                                   attributes: [.posixPermissions: 0o700])
+            // createDirectory leaves existing permissions unchanged: repair
+            // older installations before any sensitive audio can be read/written.
+            try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: self.directory.path)
+            try Self.removeExtendedACL(at: self.directory)
+            privateDirectoryReady = true
+        } catch {
+            // Caching is optional. Fail closed if its privacy boundary cannot
+            // be established, while allowing synthesis/playback to continue.
+            _enabled = false
+            SRLog.error("cache.private_directory_failed", [:])
+        }
+    }
+
+    /// POSIX mode bits do not override macOS extended ACL grants.
+    private static func removeExtendedACL(at url: URL) throws {
+        guard let emptyACL = acl_init(0) else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        defer { acl_free(UnsafeMutableRawPointer(emptyACL)) }
+        guard acl_set_file(url.path, ACL_TYPE_EXTENDED, emptyACL) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
     }
 
     // MARK: - Keying
@@ -153,7 +179,19 @@ public final class AudioCache: @unchecked Sendable {
             }
             guard let dataToWrite else { return }
             beforeDiskWrite?()
-            try? dataToWrite.write(to: file, options: .atomic)
+            do {
+                try dataToWrite.write(to: file, options: .atomic)
+                // Atomic temporary files are protected by the 0700 parent.
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600], ofItemAtPath: file.path)
+                try Self.removeExtendedACL(at: file)
+            } catch {
+                try? FileManager.default.removeItem(at: file)
+                stateLock.withLock {
+                    if pendingWrites[key]?.id == writeID { pendingWrites[key] = nil }
+                }
+                return
+            }
             let keepFile = stateLock.withLock { () -> Bool in
                 guard _enabled, pendingWrites[key]?.id == writeID else { return false }
                 pendingWrites[key] = nil
