@@ -453,7 +453,9 @@ final class PlaybackEngine: ObservableObject {
         guard gen == generation, isActive else { return }
         guard ensureEngineRunning() else { return }
         outstandingBuffers += 1
-        player.scheduleBuffer(buffer) { [weak self] in
+        // The legacy completion fires when the player consumes the buffer,
+        // before the output device plays its tail. Stopping there truncates it.
+        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, self.generation == gen else { return }
                 self.outstandingBuffers -= 1
