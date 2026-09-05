@@ -49,7 +49,8 @@ public enum Chunker {
         // Merge fragments shorter than minChunkLength into the next sentence.
         var merged: [(text: String, offset: Int)] = []
         for piece in bounded {
-            if let last = merged.last, last.text.count < minChunkLength {
+            if let last = merged.last, last.text.count < minChunkLength,
+               last.text.count + 1 + piece.text.count <= maxChunkLength {
                 merged[merged.count - 1] = (last.text + " " + piece.text, last.offset)
             } else {
                 merged.append(piece)

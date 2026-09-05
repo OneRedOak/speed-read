@@ -38,3 +38,17 @@ import Testing
         #expect(chunks.map(\.offset) == chunks.map(\.offset).sorted())
     }
 }
+
+@Suite struct ChunkLimitRegressionTests {
+    @Test func shortSentenceCannotPushFollowingChunkOverLimit() {
+        let input = "Hi! " + String(repeating: "a", count: Chunker.maxChunkLength - 1) + "."
+        let chunks = Chunker.split(input)
+        #expect(chunks.count == 2)
+        #expect(chunks.allSatisfy { $0.text.count <= Chunker.maxChunkLength })
+        #expect(chunks.map(\.text).joined(separator: " ") == input)
+        for chunk in chunks {
+            let start = input.index(input.startIndex, offsetBy: chunk.offset)
+            #expect(input[start...].hasPrefix(chunk.text))
+        }
+    }
+}
