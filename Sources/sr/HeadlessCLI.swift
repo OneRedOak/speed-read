@@ -26,30 +26,58 @@ enum HeadlessCLI {
         init?(arguments: [String]) {
             let args = Array(arguments.dropFirst())
             guard !args.isEmpty else { return nil }
-            let forceLocal = args.contains("--local")
-            let overrideCostControls = args.contains("--override-cost-controls")
-            if args.contains("--help") || args.contains("-h") {
-                self = .usage(error: nil)
-            } else if args.contains("--install-kokoro") {
-                self = .installKokoro
-            } else if let i = args.firstIndex(of: "--speak") {
-                // "-" is stdin; anything else starting with "-" is a flag the
-                // user forgot the operand before (sr --speak --local).
-                guard i + 1 < args.count,
-                      args[i + 1] == "-" || !args[i + 1].hasPrefix("-") else {
-                    self = .usage(error: "--speak requires a file path or - for stdin")
+            var command: String?
+            var source: String?
+            var forceLocal = false
+            var overrideCostControls = false
+            var wantsHelp = false
+            var index = 0
+            while index < args.count {
+                let argument = args[index]
+                switch argument {
+                case "--help", "-h":
+                    wantsHelp = true
+                case "--local":
+                    forceLocal = true
+                case "--override-cost-controls":
+                    overrideCostControls = true
+                case "--speak", "--speak-clipboard", "--install-kokoro":
+                    guard command == nil else {
+                        self = .usage(error: "choose exactly one command")
+                        return
+                    }
+                    command = argument
+                    if argument == "--speak" {
+                        guard index + 1 < args.count,
+                              args[index + 1] == "-" || !args[index + 1].hasPrefix("-") else {
+                            self = .usage(error: "--speak requires a file path or - for stdin")
+                            return
+                        }
+                        index += 1
+                        source = args[index]
+                    }
+                default:
+                    self = .usage(error: "unrecognized arguments: \(argument)")
                     return
                 }
-                self = .speak(
-                    source: args[i + 1],
-                    forceLocal: forceLocal,
-                    overrideCostControls: overrideCostControls)
-            } else if args.contains("--speak-clipboard") {
-                self = .speakClipboard(
-                    forceLocal: forceLocal,
-                    overrideCostControls: overrideCostControls)
+                index += 1
+            }
+            if wantsHelp {
+                self = .usage(error: nil)
+            } else if command == "--install-kokoro" {
+                guard !forceLocal && !overrideCostControls else {
+                    self = .usage(error: "speech flags require --speak or --speak-clipboard")
+                    return
+                }
+                self = .installKokoro
+            } else if command == "--speak", let source {
+                self = .speak(source: source, forceLocal: forceLocal,
+                              overrideCostControls: overrideCostControls)
+            } else if command == "--speak-clipboard" {
+                self = .speakClipboard(forceLocal: forceLocal,
+                                       overrideCostControls: overrideCostControls)
             } else {
-                self = .usage(error: "unrecognized arguments: \(args.joined(separator: " "))")
+                self = .usage(error: "a command is required")
             }
         }
     }
