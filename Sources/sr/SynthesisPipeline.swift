@@ -124,7 +124,7 @@ final class SynthesisPipeline: @unchecked Sendable {
                 // Flip to fallback for this and all subsequent chunks (T-7).
                 useFallback.set(true)
                 if fallbackFlag.trip() {
-                    SRLog.event("pipeline.fallback", ["trigger": String(describing: error)])
+                    SRLog.event("pipeline.fallback", ["trigger": error.logCategory])
                     await MainActor.run { callbacks.fellBack() }
                 }
                 route = fallback!
