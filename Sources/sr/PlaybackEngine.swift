@@ -239,7 +239,7 @@ final class PlaybackEngine: ObservableObject {
             // ends. Its cursor will consume this newly appended segment.
             pumpRerenderWindow()
         } else {
-            enqueueStretchAndSchedule(block)
+            enqueueStretchAndSchedule(block, isFinal: index == totalSentences - 1)
         }
     }
 
@@ -388,13 +388,14 @@ final class PlaybackEngine: ObservableObject {
     private func pumpRerenderWindow() {
         while pendingRenders + outstandingBuffers < renderWindowSize,
               let next = rerenderCursor.takeNext(existingSegmentCount: segments.count) {
-            enqueueSegmentRender(segments[next.index], offset: next.offset)
+            enqueueSegmentRender(segments[next.index], offset: next.offset,
+                                 isFinal: next.index == totalSentences - 1)
         }
     }
 
     /// Re-decode a compressed segment for seek/rate-change rendering. This is
     /// intentionally in the serial render chain so timeline order is stable.
-    private func enqueueSegmentRender(_ segment: Segment, offset: AVAudioFrameCount) {
+    private func enqueueSegmentRender(_ segment: Segment, offset: AVAudioFrameCount, isFinal: Bool) {
         let gen = generation
         let rate = renderRate
         let previous = chain
@@ -411,14 +412,14 @@ final class PlaybackEngine: ObservableObject {
                 return TimeStretch.stretch(partial, rate: rate)
             }.value
             await MainActor.run {
-                self.finishRender(rendered, generation: gen)
+                self.finishRender(rendered, generation: gen, isFinal: isFinal)
             }
         }
     }
 
     /// Append a stretch+schedule op to the serial chain. Stretching runs
     /// off the main actor; scheduling hops back and is generation-guarded.
-    private func enqueueStretchAndSchedule(_ buffer: AVAudioPCMBuffer) {
+    private func enqueueStretchAndSchedule(_ buffer: AVAudioPCMBuffer, isFinal: Bool) {
         let gen = generation
         let rate = renderRate
         let previous = chain
@@ -434,26 +435,30 @@ final class PlaybackEngine: ObservableObject {
                 TimeStretch.stretch(buffer, rate: rate)
             }.value
             await MainActor.run {
-                self.finishRender(stretched, generation: gen)
+                self.finishRender(stretched, generation: gen, isFinal: isFinal)
             }
         }
     }
 
-    private func finishRender(_ buffer: AVAudioPCMBuffer?, generation gen: Int) {
+    private func finishRender(_ buffer: AVAudioPCMBuffer?, generation gen: Int, isFinal: Bool) {
         guard gen == generation, isActive else { return }
         pendingRenders = max(pendingRenders - 1, 0)
         guard let buffer else {
             failPlayback("Audio could not be decoded while seeking.")
             return
         }
-        scheduleStretched(buffer, generation: gen)
+        scheduleStretched(buffer, generation: gen, isFinal: isFinal)
     }
 
-    private func scheduleStretched(_ buffer: AVAudioPCMBuffer, generation gen: Int) {
+    private func scheduleStretched(_ buffer: AVAudioPCMBuffer, generation gen: Int, isFinal: Bool) {
         guard gen == generation, isActive else { return }
         guard ensureEngineRunning() else { return }
         outstandingBuffers += 1
-        player.scheduleBuffer(buffer) { [weak self] in
+        // Refill/freeze the content clock as soon as non-final audio renders.
+        // Only the final buffer waits for device latency; its completion may
+        // stop the engine, so an earlier callback would truncate the tail.
+        let completionType: AVAudioPlayerNodeCompletionCallbackType = isFinal ? .dataPlayedBack : .dataRendered
+        player.scheduleBuffer(buffer, completionCallbackType: completionType) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, self.generation == gen else { return }
                 self.outstandingBuffers -= 1
