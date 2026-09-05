@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Darwin
 
 /// Content-addressed audio cache (P-10, F-9, C-4).
 ///
@@ -92,12 +93,24 @@ public final class AudioCache: @unchecked Sendable {
             // createDirectory leaves existing permissions unchanged: repair
             // older installations before any sensitive audio can be read/written.
             try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: self.directory.path)
+            try Self.removeExtendedACL(at: self.directory)
             privateDirectoryReady = true
         } catch {
             // Caching is optional. Fail closed if its privacy boundary cannot
             // be established, while allowing synthesis/playback to continue.
             _enabled = false
             SRLog.error("cache.private_directory_failed", [:])
+        }
+    }
+
+    /// POSIX mode bits do not override macOS extended ACL grants.
+    private static func removeExtendedACL(at url: URL) throws {
+        guard let emptyACL = acl_init(0) else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        defer { acl_free(UnsafeMutableRawPointer(emptyACL)) }
+        guard acl_set_file(url.path, ACL_TYPE_EXTENDED, emptyACL) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
     }
 
@@ -171,6 +184,7 @@ public final class AudioCache: @unchecked Sendable {
                 // Atomic temporary files are protected by the 0700 parent.
                 try FileManager.default.setAttributes(
                     [.posixPermissions: 0o600], ofItemAtPath: file.path)
+                try Self.removeExtendedACL(at: file)
             } catch {
                 try? FileManager.default.removeItem(at: file)
                 stateLock.withLock {
