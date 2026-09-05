@@ -412,6 +412,12 @@ final class AppState: ObservableObject {
             settings: settings.voiceSettings,
             cache: cacheEnabled ? AudioCache.shared : nil,
             cloudBudgetRemaining: cloudBudgetRemaining,
+            shouldSynthesize: { [weak self] index in
+                guard let self, self.speakGeneration == generation else { return false }
+                return SynthesisPipeline.needsChunk(
+                    index, currentSentence: self.playback.currentSentence,
+                    isPlaying: self.playback.state == .playing)
+            },
             callbacks: .init(
                 deliver: { [weak self] index, audio in
                     guard let self, self.speakGeneration == generation else { return }

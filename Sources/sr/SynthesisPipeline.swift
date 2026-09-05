@@ -15,6 +15,13 @@ import SRCore
 /// never local→cloud (that would violate P-8 routing guarantees).
 final class SynthesisPipeline: @unchecked Sendable {
     static let maxInFlight = 3
+    /// Include the current sentence plus a small startup/latency cushion.
+    static let maxBufferedChunks = 6
+
+    @MainActor static func needsChunk(_ index: Int, currentSentence: Int,
+                                     isPlaying: Bool) -> Bool {
+        isPlaying && index < currentSentence + maxBufferedChunks
+    }
 
     struct Route: Sendable {
         let provider: any TTSProvider
@@ -41,6 +48,7 @@ final class SynthesisPipeline: @unchecked Sendable {
         settings: VoiceSettings,
         cache: AudioCache?,
         cloudBudgetRemaining: Int? = nil,
+        shouldSynthesize: (@MainActor @Sendable (Int) -> Bool)? = nil,
         callbacks: Callbacks
     ) {
         cancel()
@@ -116,6 +124,14 @@ final class SynthesisPipeline: @unchecked Sendable {
         }
 
         @Sendable func synthesize(_ chunk: Chunk) async throws -> Void {
+            // Bound *total* prepared audio, not only simultaneous requests.
+            // A paused/slow listener must not pay to generate the whole article.
+            if let shouldSynthesize {
+                while !(await shouldSynthesize(chunk.id)) {
+                    try await Task.sleep(for: .milliseconds(250))
+                }
+            }
+            try Task.checkCancellation()
             var route = useFallback.value ? (fallback ?? primary) : primary
             let audio: Data
             do {
