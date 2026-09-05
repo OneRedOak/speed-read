@@ -98,6 +98,28 @@ class IdleWatchdogTests(unittest.TestCase):
             server.active_clients = original_active
 
 
+class OutputVersionTests(unittest.TestCase):
+    def test_successful_response_identifies_live_output_semantics(self):
+        import json
+        import tempfile
+        from unittest.mock import patch, Mock
+
+        conn = Mock()
+        request = json.dumps({"token": "test", "text": "test", "voice": "bf_lily"}).encode()
+        with tempfile.NamedTemporaryFile() as audio:
+            audio.write(b"audio")
+            audio.flush()
+            with patch.object(server, "AUTH_TOKEN", "test"), \
+                    patch.object(server, "_read_request_line", return_value=request), \
+                    patch.object(server, "_client_gone", return_value=False), \
+                    patch.object(server, "generate_audio", return_value=audio.name), \
+                    patch.object(server, "_release_model_scratch"), patch.object(server, "log"):
+                server.handle_client(conn)
+        response = json.loads(conn.sendall.call_args.args[0])
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["output_version"], "kokoro-82M-t2")
+
+
 class GenerationFailureTests(unittest.TestCase):
     def test_exhausted_workarounds_fail_instead_of_returning_silence(self):
         import sys

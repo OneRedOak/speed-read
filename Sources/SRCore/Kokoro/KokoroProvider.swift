@@ -130,7 +130,7 @@ public struct KokoroProvider: TTSProvider {
         switch response {
         case .error(let message):
             throw TTSError.http(status: 500, body: message)
-        case .ok(let audioFilePath):
+        case .ok(let audioFilePath), .incompatible(let audioFilePath):
             // Trust boundary: only accept paths inside the daemon's tmp root.
             // We read the file AND delete its parent directory — a stale or
             // hostile daemon must not be able to point that at ~/Documents.
@@ -143,6 +143,12 @@ public struct KokoroProvider: TTSProvider {
             defer {
                 // Client owns the temp dir (see daemon protocol doc).
                 try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+            }
+            // A GUI-owned daemon may still run the old script after a CLI
+            // update. Reject its result before playback/cache, and clean up
+            // its temp directory without terminating another process's daemon.
+            guard case .ok = response else {
+                throw TTSError.network(underlying: "kokoro: incompatible daemon")
             }
             guard let audio = try? Data(contentsOf: url),
                   AudioPayloadValidator.isWAV(audio) else {
@@ -171,6 +177,7 @@ struct KokoroRequest: Codable {
 enum KokoroWire {
     enum Response: Equatable {
         case ok(audioFile: String)
+        case incompatible(audioFile: String)
         case error(message: String)
     }
 
@@ -190,11 +197,13 @@ enum KokoroWire {
         struct Raw: Codable {
             let status: String
             let audio_file: String?
+            let output_version: String?
             let message: String?
         }
         let raw = try JSONDecoder().decode(Raw.self, from: Data(line.utf8))
         if raw.status == "ok", let file = raw.audio_file {
-            return .ok(audioFile: file)
+            return raw.output_version == KokoroProvider.cacheModelID
+                ? .ok(audioFile: file) : .incompatible(audioFile: file)
         }
         return .error(message: raw.message ?? "unknown daemon error")
     }

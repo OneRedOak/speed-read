@@ -48,6 +48,8 @@ LOG_DIR = os.path.expanduser("~/Library/Logs/sr")
 LOG_FILE = os.path.join(LOG_DIR, "kokoro.log")
 
 MODEL_ID = "mlx-community/Kokoro-82M-bf16"
+# Must match the client cache namespace: old processes may outlive an update.
+OUTPUT_VERSION = "kokoro-82M-t2"
 
 # Verified local snapshot (P-12): the supervisor passes the installer's
 # hash-verified snapshot directory so the daemon runs exactly the bytes
@@ -372,7 +374,7 @@ def handle_client(conn):
         # Size before send: once the response is out, the client owns the
         # temp dir and may delete it before we could stat it.
         audio_bytes = os.path.getsize(audio_file)
-        send({"status": "ok", "audio_file": audio_file})
+        send({"status": "ok", "audio_file": audio_file, "output_version": OUTPUT_VERSION})
         log(f"response: ok bytes={audio_bytes}")
 
     except CancelledError:
