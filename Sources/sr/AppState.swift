@@ -214,6 +214,9 @@ final class AppState: ObservableObject {
     }
 
     func stop() {
+        // Invalidate callbacks already queued on the main actor as well as
+        // cancelling their tasks. They must not change a replacement session.
+        speakGeneration += 1
         preparationGeneration += 1
         preparationTask?.cancel()
         preparationTask = nil
@@ -429,10 +432,11 @@ final class AppState: ObservableObject {
                     }
                 },
                 fellBack: { [weak self] in
-                    // Fallback is one-way for the rest of this read, so the
-                    // live Local-Only boundary no longer needs to stop it.
-                    self?.activeUsesCloud = false
-                    self?.flashStatus("Cloud unavailable — using local voice")
+                    guard let self, self.speakGeneration == generation else { return }
+                    // A fallback only reroutes future chunks. Other workers
+                    // may still have cloud requests in flight, so retain the
+                    // cloud flag until this session finishes or is stopped.
+                    self.flashStatus("Cloud unavailable — using local voice")
                 },
                 failed: { [weak self] error in
                     guard let self, self.speakGeneration == generation else { return }
