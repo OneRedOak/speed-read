@@ -191,10 +191,14 @@ final class AppState: ObservableObject {
         // lives for the app's lifetime and the task is short.
         guard !captureInFlight else { return }
         captureInFlight = true
+        let preparation = preparationGeneration
         Task.detached { [self] in
             let result = SelectionCapture.capture()
             await MainActor.run {
                 captureInFlight = false
+                // Let capture restore the clipboard, but never let a late
+                // completion undo Stop or replace a newer read.
+                guard preparationGeneration == preparation else { return }
                 handleCapture(result, fallbackRoutingAction: action)
             }
         }
