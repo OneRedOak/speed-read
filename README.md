@@ -12,6 +12,7 @@ sr is a privacy-first text-to-speech utility for macOS. It lives in your menu ba
 - **Full transport** — play/pause, ±5 s seek, restart, stop, live progress, from the menu bar panel.
 - **Smart text cleanup** — PDF line-break repair, LaTeX math to spoken English, Markdown stripping, citations, units, URLs — ported from [Speak11](https://github.com/smcantab/speak11) and parity-tested.
 - **Cache-first** — repeated reads are instant and free (content-addressed local cache, size-capped, purgeable, disableable, with burst writes coalesced into one maintenance sweep).
+- **Bounded read-ahead** — prepares only the current sentence plus five ahead; pausing prevents new requests and stopping cancels pending work. Requests already sent may still be billed.
 - **Cost controls** — live credit display, exact per-read billing, daily budget with warning/hard-stop, large-read confirmation, and a 250,000-character per-read ceiling.
 - **Privacy by construction** — see [Privacy](#privacy).
 

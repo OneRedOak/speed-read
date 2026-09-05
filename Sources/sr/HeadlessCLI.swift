@@ -278,6 +278,11 @@ enum HeadlessCLI {
                 settings: settings.voiceSettings,
                 cache: settings.cacheEnabled ? AudioCache.shared : nil,
                 cloudBudgetRemaining: cloudBudgetRemaining,
+                shouldSynthesize: { index in
+                    SynthesisPipeline.needsChunk(
+                        index, currentSentence: playback.currentSentence,
+                        isPlaying: playback.state == .playing)
+                },
                 callbacks: .init(
                     deliver: { index, audio in playback.feed(index: index, audio: audio) },
                     billed: { billed in ledger.record(billedCharacters: billed) },
