@@ -188,20 +188,17 @@ def _generate_segments(text, voice, speed, lang_code, cancel_check, depth=0):
             except ValueError as e2:
                 if "broadcast_shapes" not in str(e2):
                     raise
-        # Last resort: skip this fragment with a beat of silence rather than
-        # failing the entire read. Kokoro outputs 24 kHz mono.
-        import numpy as np
-
-        log(f"broadcast_shapes workaround exhausted: skipping text_len={len(text)}")
-        return [(np.zeros(6000, dtype=np.float32), 24000)]
+        # Never report success (and cache incomplete audio) when a fragment
+        # could not be spoken. The client will surface the failure to the user.
+        log(f"broadcast_shapes workaround exhausted: text_len={len(text)}")
+        raise RuntimeError("local synthesis workaround exhausted") from None
 
 
 def _trim_edge_silence(audio, sample_rate):
     """Trim leading/trailing silence from one generated segment.
 
     Keeps TRIM_PAD_SECONDS of natural padding at each edge. All-silent
-    segments (the broadcast_shapes last-resort beat) pass through untouched
-    — they are deliberate placeholders, not model padding.
+    segments pass through untouched because they have no speech boundary.
     """
     import numpy as np
 

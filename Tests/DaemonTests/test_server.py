@@ -98,5 +98,33 @@ class IdleWatchdogTests(unittest.TestCase):
             server.active_clients = original_active
 
 
+class GenerationFailureTests(unittest.TestCase):
+    def test_exhausted_workarounds_fail_instead_of_returning_silence(self):
+        import sys
+        from unittest.mock import patch, Mock
+
+        model = Mock()
+        model.generate.side_effect = ValueError("[broadcast_shapes] secret text")
+        # This path must raise before any array operations, so it can be
+        # verified without downloading numpy or the actual voice model.
+        with patch.object(server, "model", model), patch.object(server, "log"), \
+                patch.dict(sys.modules, {"numpy": Mock()}):
+            with self.assertRaisesRegex(RuntimeError, "^local synthesis workaround exhausted$"):
+                server._generate_segments("fragment", "bf_lily", 1, "b", None)
+        self.assertEqual(model.generate.call_count, 4)
+
+    def test_unrelated_model_errors_are_not_retried(self):
+        import sys
+        from unittest.mock import patch, Mock
+
+        model = Mock()
+        model.generate.side_effect = ValueError("unrelated")
+        with patch.object(server, "model", model), \
+                patch.dict(sys.modules, {"numpy": Mock()}):
+            with self.assertRaises(ValueError):
+                server._generate_segments("fragment", "bf_lily", 1, "b", None)
+        self.assertEqual(model.generate.call_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
