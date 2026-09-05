@@ -26,17 +26,19 @@ enum HeadlessCLI {
         init?(arguments: [String]) {
             let args = Array(arguments.dropFirst())
             guard !args.isEmpty else { return nil }
+            // Help never executes a command, even when its operand is absent.
+            if args.contains("--help") || args.contains("-h") {
+                self = .usage(error: nil)
+                return
+            }
             var command: String?
             var source: String?
             var forceLocal = false
             var overrideCostControls = false
-            var wantsHelp = false
             var index = 0
             while index < args.count {
                 let argument = args[index]
                 switch argument {
-                case "--help", "-h":
-                    wantsHelp = true
                 case "--local":
                     forceLocal = true
                 case "--override-cost-controls":
@@ -62,9 +64,7 @@ enum HeadlessCLI {
                 }
                 index += 1
             }
-            if wantsHelp {
-                self = .usage(error: nil)
-            } else if command == "--install-kokoro" {
+            if command == "--install-kokoro" {
                 guard !forceLocal && !overrideCostControls else {
                     self = .usage(error: "speech flags require --speak or --speak-clipboard")
                     return

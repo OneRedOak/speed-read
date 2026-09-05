@@ -20,6 +20,15 @@ import Testing
         #expect(error != nil)
     }
 
+    @Test(arguments: [["--speak", "--help"], ["--help", "--speak"], ["--unknown", "-h"]])
+    func helpDoesNotRequireACompleteCommand(_ args: [String]) {
+        guard case .usage(let error) = HeadlessCLI.Mode(arguments: ["sr"] + args) else {
+            Issue.record("help attempted to execute a command")
+            return
+        }
+        #expect(error == nil)
+    }
+
     @Test func acceptsFlagsBeforeCommandAndStdin() {
         guard case .speak(let source, let local, let override) = HeadlessCLI.Mode(
             arguments: ["sr", "--local", "--speak", "-", "--override-cost-controls"]) else {
