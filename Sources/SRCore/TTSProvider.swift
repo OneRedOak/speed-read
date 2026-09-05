@@ -80,3 +80,18 @@ public protocol TTSProvider: Sendable {
     func voices() async throws -> [Voice]
     func synthesize(text: String, voiceID: String, settings: VoiceSettings) async throws -> SynthesisResult
 }
+
+// Error payloads can contain provider-echoed text, URLs, or history IDs.
+// Only these fixed categories and numeric HTTP status codes may enter logs.
+extension TTSError {
+    public var logCategory: String {
+        switch self {
+        case .missingAPIKey: return "missing_api_key"
+        case .http(let status, _): return "http_\(status)"
+        case .invalidAudio: return "invalid_audio"
+        case .network: return "network"
+        case .budgetExceeded: return "budget_exceeded"
+        case .cancelled: return "cancelled"
+        }
+    }
+}
