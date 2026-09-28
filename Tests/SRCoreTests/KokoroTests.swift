@@ -34,7 +34,7 @@ import Testing
 
     @Test func responseParsesOK() throws {
         let response = try KokoroWire.decodeResponse(
-            #"{"status": "ok", "audio_file": "/tmp/gen_x/out.wav", "output_version": "kokoro-82M-t2"}"#)
+            #"{"status": "ok", "audio_file": "/tmp/gen_x/out.wav", "output_version": "kokoro-82M-t3"}"#)
         #expect(response == .ok(audioFile: "/tmp/gen_x/out.wav"))
     }
 
@@ -84,7 +84,7 @@ import Testing
         let (paths, cleanup) = try KokoroTestSupport.tempPaths()
         defer { cleanup() }
         let (version, revision, weightsSHA) = try KokoroTestSupport.manifestRoundTrip(paths)
-        #expect(version == "0.4.4")
+        #expect(version == KokoroInstaller.mlxAudioVersion)
         #expect(revision == KokoroInstaller.modelRevision)
         #expect(weightsSHA == KokoroInstaller.weightsSHA256)
     }
@@ -119,7 +119,8 @@ import Testing
     @Test func providerListsTwelveVoices() async throws {
         let voices = try await KokoroProvider().voices()
         #expect(voices.count == 12)
-        #expect(voices.first?.id == "bf_lily")
+        #expect(voices.first?.id == "af_heart")
+        #expect(voices.contains { $0.id == "af_bella" })
         #expect(KokoroProvider().isLocal == true)
     }
 }

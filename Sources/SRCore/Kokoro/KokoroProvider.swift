@@ -32,17 +32,15 @@ public struct KokoroProvider: TTSProvider {
     public let isLocal = true
 
     /// Cache-key model identifier (there is no user-selectable local model).
-    /// The "-t2" suffix invalidates older audio that may contain silent
-    /// placeholders for failed fragments. Bump whenever synthesis output
+    /// The "-t3" suffix invalidates audio from the pre-0.5.7 runtime. Bump whenever synthesis output
     /// semantics change so an older result is never replayed.
-    public static let cacheModelID = "kokoro-82M-t2"
+    public static let cacheModelID = "kokoro-82M-t3"
 
     /// Curated English subset (from the reference; full list in the model's
     /// VOICES.md). First letter encodes language: a=US, b=British.
     public static let presetVoices: [Voice] = [
-        Voice(id: "bf_lily", name: "Lily — British, bright"),
-        Voice(id: "af_heart", name: "Heart — warm"),
-        Voice(id: "af_bella", name: "Bella — soft"),
+        Voice(id: "af_heart", name: "Heart — American, warm"),
+        Voice(id: "af_bella", name: "Bella — American, soft"),
         Voice(id: "af_nova", name: "Nova — confident"),
         Voice(id: "af_sarah", name: "Sarah — gentle"),
         Voice(id: "af_sky", name: "Sky — bright"),
@@ -50,6 +48,7 @@ public struct KokoroProvider: TTSProvider {
         Voice(id: "am_echo", name: "Echo — clear"),
         Voice(id: "am_eric", name: "Eric — steady"),
         Voice(id: "am_michael", name: "Michael — warm"),
+        Voice(id: "bf_lily", name: "Lily — British, bright"),
         Voice(id: "bf_emma", name: "Emma — British, warm"),
         Voice(id: "bm_george", name: "George — British, deep"),
     ]

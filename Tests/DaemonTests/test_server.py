@@ -117,7 +117,7 @@ class OutputVersionTests(unittest.TestCase):
                 server.handle_client(conn)
         response = json.loads(conn.sendall.call_args.args[0])
         self.assertEqual(response["status"], "ok")
-        self.assertEqual(response["output_version"], "kokoro-82M-t2")
+        self.assertEqual(response["output_version"], "kokoro-82M-t3")
 
 
 class GenerationFailureTests(unittest.TestCase):

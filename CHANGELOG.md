@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Updated the offline runtime to MLX Audio 0.5.7 with a regenerated hashed
+  dependency lock. Heart and Bella lead the local voice list. Updated the
+  local audio cache version so old runtime output is regenerated.
+
 - Added Eleven v4 and v4 Turbo, with v4 Turbo as the default for new settings.
   v4 requests omit unsupported legacy voice settings; existing saved model
   choices and local playback-speed controls are preserved.

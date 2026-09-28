@@ -49,7 +49,7 @@ LOG_FILE = os.path.join(LOG_DIR, "kokoro.log")
 
 MODEL_ID = "mlx-community/Kokoro-82M-bf16"
 # Must match the client cache namespace: old processes may outlive an update.
-OUTPUT_VERSION = "kokoro-82M-t2"
+OUTPUT_VERSION = "kokoro-82M-t3"
 
 # Verified local snapshot (P-12): the supervisor passes the installer's
 # hash-verified snapshot directory so the daemon runs exactly the bytes
@@ -138,10 +138,9 @@ class CancelledError(Exception):
 def _generate_segments(text, voice, speed, lang_code, cancel_check, depth=0):
     """Yield audio segments, splitting the text on a known mlx-audio bug.
 
-    mlx-audio 0.4.4 raises ValueError('[broadcast_shapes] ...') for certain
-    voice x output-length combinations (upstream bug, fixed after 0.4.4 —
-    revisit when the pin is bumped). Splitting the text at a word boundary
-    changes the length and sidesteps the trigger; recursion is bounded.
+    Older mlx-audio runtimes raised ValueError('[broadcast_shapes] ...') for
+    certain voice x output-length combinations. Retain this bounded fallback
+    defensively after the 0.5.7 upgrade; ordinary generation does not use it.
     """
     import numpy as np
 

@@ -7,7 +7,7 @@ import Foundation
 public struct KokoroInstaller: Sendable {
     // ── Supply-chain pins (P-12), resolved 2026-07-06 ──
     /// PyPI: latest mlx-audio at pin time.
-    public static let mlxAudioVersion = "0.4.4"
+    public static let mlxAudioVersion = "0.5.7"
     /// Kokoro's English G2P is an *optional* mlx-audio dependency — without
     /// it every generation throws ImportError. Pinned like mlx-audio (P-12).
     public static let misakiVersion = "0.9.4"
@@ -20,7 +20,7 @@ public struct KokoroInstaller: Sendable {
     /// if the system lacks it — deterministic across machines).
     public static let pythonVersion = "3.12.11"
     public static let requirementsLockSHA256 =
-        "6af297636c93bca9fec1dc5fd1d8cbba9bedba962e158ce08b11600363c7f0b1"
+        "c4eb972d7c86a269d7fd23f63d8cee2881295e995cbd10e5f1ac630308a6aa8f"
     /// huggingface.co model repo + immutable revision (main @ pin time).
     public static let modelRepo = "mlx-community/Kokoro-82M-bf16"
     public static let modelRevision = "a71e4d38b236d968966a2002c4c895dbd12b1c3c"
