@@ -58,123 +58,118 @@ struct MenuView: View {
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            transportCluster
-            progressSection
-            speedSection
-            Divider()
-            speakClipboardButton
-            backendPicker
-            voicePickers
-            Divider()
-            privacySection
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Label("sr", systemImage: "waveform")
+                    .font(.system(size: 17, weight: .semibold))
+                Spacer()
+                Text(state.playback.isActive ? (isPaused ? "Paused" : "Reading") : "Ready to read")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            VStack(spacing: 14) {
+                transportCluster
+                progressSection
+                Divider()
+                speedSection
+            }
+            .padding(14)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
+
+            Button { state.speakClipboard() } label: {
+                Label("Read Clipboard", systemImage: "doc.on.clipboard")
+                    .font(.body.weight(.medium))
+                    .frame(maxWidth: .infinity, minHeight: 28)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .help("Read the text currently on your clipboard")
+
+            VStack(alignment: .leading, spacing: 12) {
+                BackendSelector(selection: $state.backendMode)
+                Text(backendCaption).font(.callout).foregroundStyle(.secondary)
+                voicePickers
+            }
             statusSection
             Divider()
-            bottomRow
+            HStack {
+                Button { showSettings() } label: {
+                    Label("Settings", systemImage: "gearshape")
+                }
+                Spacer()
+                Button("Quit sr") { NSApplication.shared.terminate(nil) }
+            }
+            .font(.callout)
+            .buttonStyle(.borderless)
         }
-        .padding(14)
-        .frame(width: 336, alignment: .leading)
-        .onAppear { state.refreshVoices() }
+        .padding(18)
+        .frame(width: 380, alignment: .leading)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .onAppear { state.refreshVoices(); state.refreshCredits() }
     }
 
-    // MARK: Transport (F-7) — the panel's hero: open menu → hit a control
-    // in one motion. Big central play/pause, generous circular hit areas,
-    // hover rings for click confidence.
+    private var isPaused: Bool { state.playback.state == .paused }
 
     private var transportCluster: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 14) {
             Spacer(minLength: 0)
-            TransportButton(systemName: "backward.end.fill",
-                            size: 30, iconSize: 11,
-                            help: "Restart from the top") {
-                state.playback.restart()
-            }
-            TransportButton(systemName: "gobackward.5",
-                            size: 38, iconSize: 17,
-                            help: "Back 5 seconds") {
-                state.playback.seek(by: -5)
-            }
-            TransportButton(systemName: isPaused || !state.playback.isActive
-                                ? "play.fill" : "pause.fill",
-                            size: 46, iconSize: 19, prominent: true,
-                            help: isPaused ? "Resume" : "Pause") {
+            TransportButton(systemName: "backward.end.fill", size: 34, iconSize: 13,
+                            help: "Restart reading") { state.playback.restart() }
+            TransportButton(systemName: "gobackward.5", size: 38, iconSize: 19,
+                            help: "Back 5 seconds") { state.playback.seek(by: -5) }
+            TransportButton(systemName: isPaused || !state.playback.isActive ? "play.fill" : "pause.fill",
+                            size: 52, iconSize: 21, prominent: true,
+                            help: isPaused ? "Resume reading" : "Pause reading") {
                 state.playback.togglePauseResume()
             }
-            TransportButton(systemName: "goforward.5",
-                            size: 38, iconSize: 17,
-                            help: "Forward 5 seconds") {
-                state.playback.seek(by: 5)
-            }
-            TransportButton(systemName: "stop.fill",
-                            size: 30, iconSize: 11,
-                            help: "Stop") {
-                state.stop()
-            }
+            TransportButton(systemName: "goforward.5", size: 38, iconSize: 19,
+                            help: "Forward 5 seconds") { state.playback.seek(by: 5) }
+            TransportButton(systemName: "stop.fill", size: 34, iconSize: 13,
+                            help: "Stop reading") { state.stop() }
             Spacer(minLength: 0)
         }
         .disabled(!state.playback.isActive)
     }
 
-    private var isPaused: Bool { state.playback.state == .paused }
-
-    @ViewBuilder
-    private var progressSection: some View {
+    @ViewBuilder private var progressSection: some View {
         if state.playback.isActive {
-            VStack(spacing: 4) {
-                ProgressView(value: min(state.playback.currentSeconds,
-                                        state.playback.availableSeconds),
+            VStack(spacing: 8) {
+                ProgressView(value: min(state.playback.currentSeconds, state.playback.availableSeconds),
                              total: max(state.playback.availableSeconds, 0.01))
-                    .progressViewStyle(.linear)
-                    .controlSize(.small)
                     .tint(.accentColor)
-                HStack(spacing: 6) {
-                    if state.playback.state == .paused {
-                        Text("Paused").fontWeight(.medium)
-                    }
+                    .accessibilityLabel("Reading progress")
+                HStack {
                     Text("Sentence \(state.playback.currentSentence + 1) of \(state.playback.totalSentences)")
                     Spacer()
-                    Text("\(timeString(state.playback.currentSeconds)) / \(timeString(state.playback.availableSeconds))")
-                        .monospacedDigit()
+                    Text(timeString(state.playback.currentSeconds)).monospacedDigit()
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(.callout).foregroundStyle(.secondary)
             }
         } else {
-            Text("Select text anywhere, then press \(shortcutHint)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .center)
+            VStack(spacing: 4) {
+                Text("Select text in any app")
+                    .font(.body.weight(.medium))
+                Text("Press \(shortcutHint) to read it aloud")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
         }
     }
 
-    private func timeString(_ seconds: Double) -> String {
-        let total = Int(seconds.rounded())
-        return String(format: "%d:%02d", total / 60, total % 60)
-    }
-
-    private var shortcutHint: String {
-        KeyboardShortcuts.getShortcut(for: .speakOrStop)?.description ?? "the hotkey (unset)"
-    }
-
-    // MARK: Speed (F-8) — slider for fine control, chips for the speeds
-    // you actually use without needing slider precision.
-
     private var speedSection: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 10) {
             HStack {
-                Image(systemName: "tortoise").imageScale(.small)
-                    .foregroundStyle(.secondary)
-                Slider(value: $state.playbackRate, in: 0.5...3.0, step: 0.1)
-                Image(systemName: "hare").imageScale(.small)
-                    .foregroundStyle(.secondary)
-                Text(String(format: "%.1f×", state.playbackRate))
-                    .font(.caption.monospacedDigit().weight(.medium))
-                    .frame(width: 34, alignment: .trailing)
+                Text("Reading speed").font(.callout.weight(.medium))
+                Spacer()
+                Text(state.playbackRate.formatted(.number.precision(.fractionLength(0...2))) + "×")
+                    .font(.callout.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(Color.accentColor)
             }
-            HStack(spacing: 6) {
+            Slider(value: $state.playbackRate, in: 0.5...3.0, step: 0.05)
+                .accessibilityLabel("Reading speed")
+                .accessibilityValue(state.playbackRate.formatted() + " times")
+            HStack(spacing: 8) {
                 ForEach([1.0, 1.25, 1.5, 2.0], id: \.self) { preset in
-                    SpeedChip(value: preset,
-                              isActive: abs(state.playbackRate - preset) < 0.05) {
+                    SpeedChip(value: preset, isActive: abs(state.playbackRate - preset) < 0.01) {
                         state.playbackRate = preset
                     }
                 }
@@ -182,136 +177,110 @@ struct MenuView: View {
         }
     }
 
-    private var speakClipboardButton: some View {
-        Button {
-            state.speakClipboard()
-        } label: {
-            Label("Speak Clipboard", systemImage: "doc.on.clipboard")
-                .frame(maxWidth: .infinity)
-        }
-        .controlSize(.large)
-    }
-
-    // MARK: Backend & voices (F-3, P-8 Local-Only)
-
-    private var backendPicker: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            BackendSelector(selection: $state.backendMode)
-            Text(backendCaption)
-                .font(.caption2).foregroundStyle(.tertiary)
-                .padding(.leading, 2)
-        }
-    }
-
     private var backendCaption: String {
         switch state.backendMode {
-        case .auto: return "Cloud voices, local fallback if the cloud fails"
-        case .cloud: return "ElevenLabs only"
-        case .local: return "Nothing ever leaves this Mac"
+        case .auto: return "ElevenLabs, with an offline fallback."
+        case .cloud: return "ElevenLabs · uses your API credits"
+        case .local: return "On this Mac · offline, no API costs"
         }
     }
 
-    @ViewBuilder
-    private var voicePickers: some View {
+    @ViewBuilder private var voicePickers: some View {
         if state.backendMode != .local {
-            Picker("Voice", selection: $state.voiceID) {
-                ForEach(state.availableVoices) { voice in
-                    Text(voice.name).tag(voice.id)
-                }
-                if !state.availableVoices.contains(where: { $0.id == state.voiceID }) {
-                    Text("Custom (\(String(state.voiceID.prefix(8)))…)").tag(state.voiceID)
-                }
+            selectionMenu("Voice", value: state.availableVoices.first { $0.id == state.voiceID }?.name ?? "Custom voice") {
+                Picker("Cloud voice", selection: $state.voiceID) {
+                    ForEach(state.availableVoices) { Text($0.name).tag($0.id) }
+                    if !state.availableVoices.contains(where: { $0.id == state.voiceID }) {
+                        Text("Custom voice").tag(state.voiceID)
+                    }
+                }.labelsHidden()
             }
-            Picker("Model", selection: $state.modelID) {
-                ForEach(ElevenLabsProvider.models, id: \.id) { model in
-                    Text(model.name).tag(model.id)
-                }
+            selectionMenu("Model", value: ElevenLabsProvider.models.first { $0.id == state.modelID }?.name ?? state.modelID) {
+                Picker("Cloud model", selection: $state.modelID) {
+                    ForEach(ElevenLabsProvider.models, id: \.id) { Text($0.name).tag($0.id) }
+                }.labelsHidden()
             }
         }
-        if state.kokoroInstalled && state.backendMode != .cloud {
-            Picker("Local voice", selection: $state.localVoiceID) {
-                ForEach(KokoroProvider.presetVoices) { voice in
-                    Text(voice.name).tag(voice.id)
+        if state.backendMode != .cloud {
+            selectionMenu(state.backendMode == .auto ? "Offline voice" : "Voice",
+                          value: KokoroProvider.presetVoices.first { $0.id == state.localVoiceID }?.name ?? "Custom local voice") {
+                Picker("Local voice", selection: $state.localVoiceID) {
+                    ForEach(KokoroProvider.presetVoices) { Text($0.name).tag($0.id) }
+                }.labelsHidden()
+            }
+            .disabled(!state.kokoroInstalled)
+            if state.backendMode == .local {
+                selectionMenu("Model", value: "Kokoro v1.0 · 82M") {
+                    Picker("Local model", selection: .constant(KokoroProvider.cacheModelID)) {
+                        Text("Kokoro v1.0 · 82M (installed)").tag(KokoroProvider.cacheModelID)
+                    }.labelsHidden()
                 }
+                .disabled(!state.kokoroInstalled)
             }
         }
     }
 
-    // MARK: Privacy & status (P-6, P-10, C-1/C-2)
-
-    private var privacySection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Toggle("Auto-delete ElevenLabs history", isOn: $state.autoDeleteHistory)
-                .toggleStyle(.checkbox)
-            Toggle("Cache audio", isOn: $state.cacheEnabled)
-                .toggleStyle(.checkbox)
-                .help("Disable for sensitive sessions — nothing is written to disk")
-            if !state.historyStatus.isEmpty {
-                Text(state.historyStatus)
-                    .font(.caption2).foregroundStyle(.tertiary)
+    private func selectionMenu<Content: View>(_ title: String, value: String,
+                                              @ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 10) {
+            Text(title).foregroundStyle(.secondary).frame(width: 82, alignment: .leading)
+            Menu(content: content) {
+                Text(value).lineLimit(1).truncationMode(.tail)
             }
+            .menuStyle(.borderlessButton)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .help(value)
+            .accessibilityLabel(title + ": " + value)
         }
         .font(.callout)
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
     }
 
-    @ViewBuilder
-    private var statusSection: some View {
-        if !state.accessibilityGranted {
-            Button {
-                state.promptForAccessibility()
-            } label: {
-                Label("Grant Accessibility (reads your selection)", systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(.orange)
+    @ViewBuilder private var statusSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if !state.accessibilityGranted {
+                Button { state.promptForAccessibility() } label: {
+                    Label("Enable reading selected text", systemImage: "exclamationmark.triangle")
+                }.buttonStyle(.borderless)
             }
-            .buttonStyle(.borderless)
-        }
-        if let message = state.statusMessage {
-            Text(message).font(.caption).foregroundStyle(.orange)
-        }
-        if let installStatus = state.kokoroInstallStatus {
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text(installStatus).font(.caption).foregroundStyle(.secondary)
+            if let message = state.statusMessage {
+                Label(message, systemImage: state.lastError == message ? "exclamationmark.triangle" : "info.circle")
+                    .font(.callout).foregroundStyle(.primary).fixedSize(horizontal: false, vertical: true)
             }
-        }
-        if !state.kokoroInstalled && state.kokoroInstallStatus == nil {
-            Button(state.kokoroNeedsUpdate
-                   ? "Update Local Voice Runtime…"
-                   : "Install Local Voice (Kokoro, ~330 MB)…") {
-                state.installKokoro()
+            if let status = state.kokoroInstallStatus {
+                HStack { ProgressView().controlSize(.small); Text(status).font(.callout) }
+            } else if !state.kokoroInstalled {
+                Button(state.kokoroNeedsUpdate ? "Update offline voices…" : "Install offline voices…") {
+                    state.installKokoro()
+                }.buttonStyle(.bordered)
             }
-            .buttonStyle(.borderless)
-            .font(.callout)
-        }
-        HStack(spacing: 4) {
-            if let remaining = state.creditsRemaining, let limit = state.creditsLimit {
-                Text("Credits \(remaining.formatted()) / \(limit.formatted())")
-            }
-            let spent = state.ledger.spentToday
-            if spent > 0 {
-                Text("· \(spent.formatted()) today")
+            if state.backendMode != .local, let remaining = state.creditsRemaining {
+                HStack {
+                    Label("\(remaining.formatted()) credits left", systemImage: "cloud")
+                    Spacer()
+                    Text("\(state.ledger.spentToday.formatted()) today")
+                }.font(.caption).foregroundStyle(.secondary)
+            } else if state.backendMode == .local, state.kokoroInstalled {
+                Label("Kokoro installed · MLX Audio \(KokoroInstaller.mlxAudioVersion)", systemImage: "checkmark.circle")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
-        .font(.caption2).foregroundStyle(.tertiary)
     }
 
-    private var bottomRow: some View {
-        HStack {
-            Button("Settings…") {
-                // Accessory apps never truly become active, so key events
-                // bypass their windows (the shortcut recorder would focus but
-                // receive nothing). Become a regular app while Settings is
-                // open; SettingsView.onDisappear restores accessory mode.
-                NSApp.setActivationPolicy(.regular)
-                NSApp.activate(ignoringOtherApps: true)
-                openSettings()
-            }
-            Spacer()
-            Button("Quit sr") {
-                NSApplication.shared.terminate(nil)
-            }
-        }
-        .buttonStyle(.borderless)
+    private func showSettings() {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        openSettings()
+    }
+
+    private var shortcutHint: String {
+        KeyboardShortcuts.getShortcut(for: .speakOrStop)?.description ?? "your shortcut (set in Settings)"
+    }
+
+    private func timeString(_ seconds: Double) -> String {
+        let total = Int(seconds.rounded())
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 }
 
@@ -353,6 +322,7 @@ private struct TransportButton: View {
         .opacity(isEnabled ? 1 : 0.35)
         .onHover { hovering = $0 }
         .help(help)
+        .accessibilityLabel(help)
         .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }
@@ -415,7 +385,7 @@ private struct BackendSegment: View {
             }
             .foregroundStyle(isActive ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 6)
+            .padding(.vertical, 9)
             .background(
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
                     .fill(isActive
@@ -427,6 +397,7 @@ private struct BackendSegment: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .help(help)
+        .accessibilityLabel(help)
     }
 }
 
@@ -441,9 +412,9 @@ private struct SpeedChip: View {
     var body: some View {
         Button(action: action) {
             Text(label)
-                .font(.caption.monospacedDigit().weight(isActive ? .semibold : .regular))
-                .padding(.horizontal, 9)
-                .padding(.vertical, 3)
+                .font(.callout.monospacedDigit().weight(isActive ? .semibold : .regular))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
                 .background(
                     Capsule().fill(isActive
                         ? AnyShapeStyle(Color.accentColor.opacity(0.25))
@@ -461,8 +432,7 @@ private struct SpeedChip: View {
     }
 
     private var label: String {
-        value == value.rounded() ? String(format: "%.0f×", value)
-                                 : String(format: "%.2g×", value)
+        value.formatted(.number.precision(.fractionLength(0...2))) + "×"
     }
 }
 
@@ -541,13 +511,37 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Privacy & Storage") {
+                Toggle("Auto-delete ElevenLabs history", isOn: $state.autoDeleteHistory)
+                Text("Removes cloud generations from your ElevenLabs history after synthesis.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Cache audio for free replays", isOn: $state.cacheEnabled)
+                Text("Turn off caching for sensitive reads. Existing audio stays until you purge it.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if !state.historyStatus.isEmpty {
+                    Text(state.historyStatus).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+
+            Section("Offline Voices") {
+                LabeledContent("Model", value: "Kokoro v1.0 · 82M")
+                LabeledContent("Runtime", value: "MLX Audio \(KokoroInstaller.mlxAudioVersion)")
+                LabeledContent("Status", value: state.kokoroInstalled ? "Installed" : "Update or installation required")
+                Text("Includes Heart, Bella, Michael, and other English voices. Choose Local or Auto in the reader to select a voice.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if !state.kokoroInstalled {
+                    Button(state.kokoroNeedsUpdate ? "Update Offline Voices" : "Install Offline Voices") { state.installKokoro() }
+                        .disabled(state.kokoroInstallStatus != nil)
+                }
+                if let status = state.kokoroInstallStatus { Text(status).font(.caption) }
+            }
+
             Section("Maintenance") {
                 Button("Purge Audio Cache") { state.purgeCache() }
             }
         }
         .formStyle(.grouped)
-        .frame(width: 420)
-        .fixedSize(horizontal: false, vertical: true)
+        .frame(width: 480, height: 680)
         .onAppear {
             NSApp.setActivationPolicy(.regular)
             NSApp.activate(ignoringOtherApps: true)

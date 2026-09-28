@@ -19,7 +19,8 @@ extension KeyboardShortcuts.Name {
 /// synthesize (cache-first, budgeted) → play. Owns all mutable app state.
 @MainActor
 final class AppState: ObservableObject {
-    let settings = SettingsStore()
+    private let servicesEnabled: Bool
+    let settings: SettingsStore
     let playback: PlaybackEngine
     let ledger = CostLedger()
     private let pipeline = SynthesisPipeline()
@@ -90,8 +91,9 @@ final class AppState: ObservableObject {
     private var preparationGeneration = 0
     private var activeUsesCloud = false
 
-    init() {
-        let store = SettingsStore()
+    init(store: SettingsStore = SettingsStore(), startServices: Bool = true) {
+        settings = store
+        servicesEnabled = startServices
         playback = PlaybackEngine(rate: store.playbackRate,
                                   sentencePauseMS: store.sentencePauseMS)
         playbackRate = store.playbackRate
@@ -614,6 +616,7 @@ final class AppState: ObservableObject {
     // MARK: - Voices (F-10)
 
     func refreshVoices(force: Bool = false) {
+        guard servicesEnabled else { return }
         if !force, let at = voicesFetchedAt, Date().timeIntervalSince(at) < 3600 { return }
         Task { [weak self] in
             guard let self else { return }
@@ -632,6 +635,7 @@ final class AppState: ObservableObject {
     // MARK: - Credits (C-1)
 
     func refreshCredits() {
+        guard servicesEnabled else { return }
         Task { [weak self] in
             guard let self else { return }
             guard let sub = try? await ElevenLabsProvider().subscription() else { return }

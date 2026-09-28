@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Redesigned the reader with clearer playback grouping, a wider panel, readable
+  status text, and aligned voice/model menus. Local mode shows the installed
+  Kokoro model; privacy and storage controls moved to Settings. Corrected the
+  1.25× label and made slider increments match the speed presets. Added optional
+  isolated SwiftUI renders for light/dark, Cloud/Auto/Local layouts.
+
 - Updated the offline runtime to MLX Audio 0.5.7 with a regenerated hashed
   dependency lock. Heart and Bella lead the local voice list. Updated the
   local audio cache version so old runtime output is regenerated.

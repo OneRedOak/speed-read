@@ -35,7 +35,7 @@ Then, one-time setup:
 
 1. **Grant Accessibility** when prompted (System Settings → Privacy & Security → Accessibility → enable **sr**). This is what lets sr read your selection; the hotkey itself works without it.
 2. **Add your ElevenLabs key**: menu bar → waveform icon → Settings… → paste key → Save. It is stored only in the macOS Keychain. Recommended: create a dedicated key scoped to *Text-to-Speech + User Read*, and opt out of training under ElevenLabs → Terms & Privacy → Data Use.
-3. *(Optional, for offline use)* click **Install Local Voice (Kokoro, ~330 MB)** in the menu. The Python version and full dependency closure are pinned and hash-verified; the model revision and behavior-defining files are checksum-verified too.
+3. *(Optional, for offline use)* click **Install offline voices…** in the menu or **Settings → Offline Voices**. The Python version and full dependency closure are pinned and hash-verified; the model revision and behavior-defining files are checksum-verified too.
 4. *(Optional)* System Settings → General → Login Items → **+** → `/Applications/sr.app` to start at login.
 
 ## Usage
@@ -117,3 +117,20 @@ Layout: `Sources/SRCore` (engine: normalizer, providers, cache, cost, privacy), 
 ### Cloud model selection
 
 v4 Turbo is the default for new settings. Existing saved model choices are preserved; choose **v4 Turbo — recommended** in the Model picker to switch. Both v4 models send only their supported Stability and Similarity settings. Playback speed remains local, so changing speed reuses cached audio. Older models remain available.
+
+### Offline voices and reader controls
+
+The local engine is Kokoro v1.0 (82M), running on the pinned MLX Audio 0.5.7 runtime.
+Heart and Bella are included in the verified model download; no separate voice
+subscription is needed. Select **Local → Voice** to choose either, or use the
+**Offline voice** menu in Auto mode. Local mode also shows the installed model.
+Existing voice selections are preserved.
+
+The reader groups playback and speed controls above the voice menus. Privacy,
+cloud-history deletion, and cache controls live in **Settings → Privacy & Storage**.
+The displayed playback time is elapsed content time; it does not pretend that
+partially generated audio is the full duration of the selection.
+
+To render isolated light/dark UI fixtures without reading personal text, run
+`SR_RENDER_UI=1 make test`. Images are written to `/tmp/sr-ui-review` (override with
+`SR_UI_OUTPUT`). These renders complement, but do not replace, live interaction QA.
