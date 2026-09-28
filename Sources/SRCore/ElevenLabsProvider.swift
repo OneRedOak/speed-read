@@ -3,19 +3,21 @@ import Foundation
 /// ElevenLabs cloud provider (F-3).
 ///
 /// Network endpoints (P-11 allowlist): api.elevenlabs.io only.
-/// API speed is pinned at 1.0 — playback rate is client-side (F-8).
+/// Playback rate is client-side (F-8); legacy API speed is pinned at 1.0.
 public struct ElevenLabsProvider: TTSProvider {
     public let id = "elevenlabs"
     public let isLocal = false
 
-    public static let defaultModelID = "eleven_flash_v2_5"
+    public static let defaultModelID = "eleven_v4_turbo"
     public static let outputFormat = "mp3_44100_128"
 
     public static let models: [(name: String, id: String)] = [
-        ("Flash v2.5 — fastest", "eleven_flash_v2_5"),
-        ("Turbo v2.5 — fast, ½ cost", "eleven_turbo_v2_5"),
-        ("Multilingual v2 — max quality", "eleven_multilingual_v2"),
-        ("v3 — most expressive", "eleven_v3"),
+        ("v4 Turbo — recommended", "eleven_v4_turbo"),
+        ("v4 — highest quality", "eleven_v4"),
+        ("Flash v2.5 — low latency", "eleven_flash_v2_5"),
+        ("Turbo v2.5 — legacy", "eleven_turbo_v2_5"),
+        ("Multilingual v2 — long-form", "eleven_multilingual_v2"),
+        ("v3 — expressive", "eleven_v3"),
     ]
 
     /// Bootstrap fallback only — the picker fetches the account's real voice
@@ -54,6 +56,35 @@ public struct ElevenLabsProvider: TTSProvider {
         return list.voices.map { Voice(id: $0.voice_id, name: $0.name) }
     }
 
+    /// v4 supports only stability and similarity; omit legacy-only fields.
+    /// Kept separate from transport so the actual wire payload is testable.
+    func synthesisBody(text: String, settings: VoiceSettings) throws -> Data {
+        let isV4 = modelID == "eleven_v4" || modelID == "eleven_v4_turbo"
+        struct Body: Encodable {
+            struct Settings: Encodable {
+                let stability: Double
+                let similarity_boost: Double
+                let style: Double?
+                let use_speaker_boost: Bool?
+                let speed: Double?
+            }
+            let text: String
+            let model_id: String
+            let voice_settings: Settings
+        }
+        return try JSONEncoder().encode(Body(
+            text: text,
+            model_id: modelID,
+            voice_settings: .init(
+                stability: settings.stability,
+                similarity_boost: settings.similarityBoost,
+                style: isV4 ? nil : settings.style,
+                use_speaker_boost: isV4 ? nil : settings.useSpeakerBoost,
+                speed: isV4 ? nil : 1.0  // Playback speed stays client-side.
+            )
+        ))
+    }
+
     public func synthesize(text: String, voiceID: String, settings: VoiceSettings) async throws -> SynthesisResult {
         // Test seam for T-7 (fallback verification): behave exactly like a
         // quota-exhausted account without touching the network.
@@ -82,29 +113,7 @@ public struct ElevenLabsProvider: TTSProvider {
         request.setValue(key, forHTTPHeaderField: "xi-api-key")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        struct Body: Encodable {
-            struct Settings: Encodable {
-                let stability: Double
-                let similarity_boost: Double
-                let style: Double
-                let use_speaker_boost: Bool
-                let speed: Double
-            }
-            let text: String
-            let model_id: String
-            let voice_settings: Settings
-        }
-        request.httpBody = try JSONEncoder().encode(Body(
-            text: text,
-            model_id: modelID,
-            voice_settings: .init(
-                stability: settings.stability,
-                similarity_boost: settings.similarityBoost,
-                style: settings.style,
-                use_speaker_boost: settings.useSpeakerBoost,
-                speed: 1.0  // F-8: cached audio stays speed-agnostic
-            )
-        ))
+        request.httpBody = try synthesisBody(text: text, settings: settings)
 
         let started = Date()
         let data: Data

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added Eleven v4 and v4 Turbo, with v4 Turbo as the default for new settings.
+  v4 requests omit unsupported legacy voice settings; existing saved model
+  choices and local playback-speed controls are preserved.
+
 - Fixed jarring pauses between sentences on the local voice at faster playback
   rates: Kokoro bakes ~0.4 s leading / ~0.6 s trailing silence into every
   generated segment, so each boundary carried ~1 s of dead air on top of the

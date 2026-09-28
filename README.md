@@ -7,7 +7,7 @@ sr is a privacy-first text-to-speech utility for macOS. It lives in your menu ba
 ## Features
 
 - **Read anything, anywhere** — global hotkey (default ⌥⇧/) speaks the current selection in Safari, Chrome, Preview PDFs, VS Code, Slack, Mail, Terminal. Accessibility-API capture first; clipboard fallback restores your clipboard byte-for-byte.
-- **Top-tier voices** — ElevenLabs (Flash v2.5 / Turbo / Multilingual v2 / v3) with your account's full voice list, or the local Kokoro model (free, offline, Apple Silicon).
+- **Top-tier voices** — ElevenLabs (v4 Turbo by default / v4 / Flash v2.5 / Turbo v2.5 / Multilingual v2 / v3) with your account's full voice list, or the local Kokoro model (free, offline, Apple Silicon).
 - **Instant, pitch-perfect speed** — 0.5×–3.0× applied client-side with time-domain (WSOLA) stretching. Changing speed never re-generates audio and never costs credits.
 - **Full transport** — play/pause, ±5 s seek, restart, stop, live progress, from the menu bar panel.
 - **Smart text cleanup** — PDF line-break repair, LaTeX math to spoken English, Markdown stripping, citations, units, URLs — ported from [Speak11](https://github.com/smcantab/speak11) and parity-tested.
@@ -113,3 +113,7 @@ Layout: `Sources/SRCore` (engine: normalizer, providers, cache, cost, privacy), 
 ## License
 
 [MIT](LICENSE)
+
+### Cloud model selection
+
+v4 Turbo is the default for new settings. Existing saved model choices are preserved; choose **v4 Turbo — recommended** in the Model picker to switch. Both v4 models send only their supported Stability and Similarity settings. Playback speed remains local, so changing speed reuses cached audio. Older models remain available.
