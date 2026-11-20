@@ -12,6 +12,7 @@ public struct SettingsStore {
     private enum Key {
         static let voiceID = "voiceID"
         static let modelID = "modelID"
+        static let audioQuality = "audioQuality"
         static let playbackRate = "playbackRate"
         static let sentencePauseMS = "sentencePauseMS"
         static let stability = "stability"
@@ -39,6 +40,15 @@ public struct SettingsStore {
         nonmutating set { defaults.set(newValue, forKey: Key.modelID) }
     }
 
+    public var audioQuality: ElevenLabsProvider.AudioQuality {
+        get {
+            ElevenLabsProvider.AudioQuality(
+                rawValue: defaults.string(forKey: Key.audioQuality) ?? ""
+            ) ?? .standard
+        }
+        nonmutating set { defaults.set(newValue.rawValue, forKey: Key.audioQuality) }
+    }
+
     /// Client-side playback rate, 0.5–3.0 (F-8).
     public var playbackRate: Double {
         get {
@@ -51,10 +61,10 @@ public struct SettingsStore {
     /// Inter-sentence pause in ms at 1.0× (scales inversely with rate, F-5).
     public var sentencePauseMS: Int {
         get {
-            defaults.object(forKey: Key.sentencePauseMS) == nil
-                ? 400 : defaults.integer(forKey: Key.sentencePauseMS)
+            guard defaults.object(forKey: Key.sentencePauseMS) != nil else { return 400 }
+            return min(max(defaults.integer(forKey: Key.sentencePauseMS), 0), 1500)
         }
-        nonmutating set { defaults.set(newValue, forKey: Key.sentencePauseMS) }
+        nonmutating set { defaults.set(min(max(newValue, 0), 1500), forKey: Key.sentencePauseMS) }
     }
 
     /// ElevenLabs history auto-delete (P-6). ON by default.
@@ -83,8 +93,10 @@ public struct SettingsStore {
         nonmutating set { defaults.set(newValue.rawValue, forKey: Key.backendMode) }
     }
 
+    /// Default to Heart (`af_heart`), Kokoro v1.0's flagship voice; existing
+    /// saved local voice preferences are preserved.
     public var localVoiceID: String {
-        get { defaults.string(forKey: Key.localVoiceID) ?? "bf_lily" }
+        get { defaults.string(forKey: Key.localVoiceID) ?? KokoroProvider.presetVoices[0].id }
         nonmutating set { defaults.set(newValue, forKey: Key.localVoiceID) }
     }
 
@@ -92,18 +104,18 @@ public struct SettingsStore {
         get {
             VoiceSettings(
                 stability: defaults.object(forKey: Key.stability) == nil
-                    ? 0.5 : defaults.double(forKey: Key.stability),
+                    ? 0.5 : min(max(defaults.double(forKey: Key.stability), 0.0), 1.0),
                 similarityBoost: defaults.object(forKey: Key.similarityBoost) == nil
-                    ? 0.75 : defaults.double(forKey: Key.similarityBoost),
-                style: defaults.double(forKey: Key.style),
+                    ? 0.75 : min(max(defaults.double(forKey: Key.similarityBoost), 0.0), 1.0),
+                style: min(max(defaults.double(forKey: Key.style), 0.0), 1.0),
                 useSpeakerBoost: defaults.object(forKey: Key.useSpeakerBoost) == nil
                     ? true : defaults.bool(forKey: Key.useSpeakerBoost)
             )
         }
         nonmutating set {
-            defaults.set(newValue.stability, forKey: Key.stability)
-            defaults.set(newValue.similarityBoost, forKey: Key.similarityBoost)
-            defaults.set(newValue.style, forKey: Key.style)
+            defaults.set(min(max(newValue.stability, 0.0), 1.0), forKey: Key.stability)
+            defaults.set(min(max(newValue.similarityBoost, 0.0), 1.0), forKey: Key.similarityBoost)
+            defaults.set(min(max(newValue.style, 0.0), 1.0), forKey: Key.style)
             defaults.set(newValue.useSpeakerBoost, forKey: Key.useSpeakerBoost)
         }
     }

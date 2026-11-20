@@ -21,14 +21,16 @@ public struct CostLedger: @unchecked Sendable {
         static let largeReadThreshold = "largeReadThreshold"
     }
 
-    private static let dayFormat: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        f.timeZone = .current
-        return f
-    }()
-
-    private var today: String { Self.dayFormat.string(from: Date()) }
+    /// Thread-safe local calendar day stamp that tracks timezone changes
+    /// dynamically (avoiding non-thread-safe shared `DateFormatter`).
+    private var today: String {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone.autoupdatingCurrent
+        let comps = cal.dateComponents([.year, .month, .day], from: Date())
+        return String(
+            format: "%04d-%02d-%02d",
+            comps.year ?? 0, comps.month ?? 0, comps.day ?? 0)
+    }
 
     /// Daily character budget (C-2). Default 30,000 ≈ a few long articles.
     public var dailyBudget: Int {
@@ -36,7 +38,7 @@ public struct CostLedger: @unchecked Sendable {
             defaults.object(forKey: Key.budget) == nil
                 ? 30_000 : defaults.integer(forKey: Key.budget)
         }
-        nonmutating set { defaults.set(newValue, forKey: Key.budget) }
+        nonmutating set { defaults.set(max(0, newValue), forKey: Key.budget) }
     }
 
     /// Selections above this prompt for confirmation (C-3). Default 8,000.
@@ -45,12 +47,12 @@ public struct CostLedger: @unchecked Sendable {
             defaults.object(forKey: Key.largeReadThreshold) == nil
                 ? 8_000 : defaults.integer(forKey: Key.largeReadThreshold)
         }
-        nonmutating set { defaults.set(newValue, forKey: Key.largeReadThreshold) }
+        nonmutating set { defaults.set(max(0, newValue), forKey: Key.largeReadThreshold) }
     }
 
     public var spentToday: Int {
         guard defaults.string(forKey: Key.day) == today else { return 0 }
-        return defaults.integer(forKey: Key.spent)
+        return max(defaults.integer(forKey: Key.spent), 0)
     }
 
     /// Serializes the read-modify-write: up to 3 pipeline chunks can bill
@@ -58,11 +60,15 @@ public struct CostLedger: @unchecked Sendable {
     private static let recordLock = NSLock()
 
     public func record(billedCharacters: Int) {
+        let delta = max(billedCharacters, 0)
+        guard delta > 0 else { return }
         Self.recordLock.lock()
         defer { Self.recordLock.unlock() }
-        let base = spentToday
-        defaults.set(today, forKey: Key.day)
-        defaults.set(base + billedCharacters, forKey: Key.spent)
+        let day = today
+        let base = defaults.string(forKey: Key.day) == day
+            ? max(defaults.integer(forKey: Key.spent), 0) : 0
+        defaults.set(day, forKey: Key.day)
+        defaults.set(base + delta, forKey: Key.spent)
     }
 
     /// One-click override: budget ignored for the rest of today (C-2).
@@ -84,7 +90,7 @@ public struct CostLedger: @unchecked Sendable {
         let spent = spentToday
         let budget = dailyBudget
         if spent >= budget { return .exceeded(spent: spent, budget: budget) }
-        if spent * 5 >= budget * 4 { return .warning(spent: spent, budget: budget) }
+        if Double(spent) >= Double(budget) * 0.8 { return .warning(spent: spent, budget: budget) }
         return .ok
     }
 }

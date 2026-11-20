@@ -28,6 +28,7 @@ public actor HistoryJanitor {
     static let retryDelays: [TimeInterval] = [6, 20]
 
     private let initialDelay: TimeInterval
+    private let retryDelays: [TimeInterval]
     private let deleteHistoryItem: @Sendable (String) async -> Int?
     private var pending: [PendingDelete] = []
     private var inFlight: PendingDelete?
@@ -39,14 +40,17 @@ public actor HistoryJanitor {
     public init() {
         let provider = ElevenLabsProvider()
         self.initialDelay = Self.initialDelay
+        self.retryDelays = Self.retryDelays
         self.deleteHistoryItem = { id in await provider.deleteHistoryItem(id) }
     }
 
     init(
         initialDelay: TimeInterval,
+        retryDelays: [TimeInterval] = HistoryJanitor.retryDelays,
         deleteHistoryItem: @escaping @Sendable (String) async -> Int?
     ) {
         self.initialDelay = initialDelay
+        self.retryDelays = retryDelays
         self.deleteHistoryItem = deleteHistoryItem
     }
 
@@ -69,20 +73,29 @@ public actor HistoryJanitor {
 
     private func processQueue() async {
         while !pending.isEmpty {
-            // FIFO, but never before an item's notBefore time.
-            var item = pending.removeFirst()
-            inFlight = item
-            let wait = item.notBefore.timeIntervalSinceNow
+            // Always pick the earliest-ready item so a single item waiting on
+            // a 6 s or 20 s 404 retry never head-of-line blocks newly ready items.
+            let nextIndex = pending.indices.min {
+                pending[$0].notBefore < pending[$1].notBefore
+            } ?? 0
+            let wait = pending[nextIndex].notBefore.timeIntervalSinceNow
             if wait > 0 {
-                try? await Task.sleep(for: .seconds(wait))
+                // Sleep in short bounded steps so an item enqueued with an
+                // earlier `notBefore` can run as soon as it becomes ready.
+                let slice = min(wait, 0.5)
+                try? await Task.sleep(for: .seconds(slice))
+                continue
             }
+
+            var item = pending.remove(at: nextIndex)
+            inFlight = item
 
             switch await deleteHistoryItem(item.id) {
             case 200:
                 deletedTotal += 1
                 lastStatus = .ok(count: deletedTotal, at: Date())
-            case 404 where item.attempts < Self.retryDelays.count:
-                item.notBefore = Date().addingTimeInterval(Self.retryDelays[item.attempts])
+            case 404 where item.attempts < retryDelays.count:
+                item.notBefore = Date().addingTimeInterval(retryDelays[item.attempts])
                 item.attempts += 1
                 pending.append(item)
             case 404:
@@ -91,9 +104,9 @@ public actor HistoryJanitor {
                 deletedTotal += 1
                 lastStatus = .ok(count: deletedTotal, at: Date())
             default:
-                // Transient (network / 5xx): one more try, then give up.
-                if item.attempts < Self.retryDelays.count {
-                    item.notBefore = Date().addingTimeInterval(Self.retryDelays[item.attempts])
+                // Transient (network / 5xx): retry on the backoff ladder, then give up.
+                if item.attempts < retryDelays.count {
+                    item.notBefore = Date().addingTimeInterval(retryDelays[item.attempts])
                     item.attempts += 1
                     pending.append(item)
                 } else {
@@ -114,7 +127,7 @@ public actor HistoryJanitor {
     public func waitUntilDrained(timeout: TimeInterval) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while (draining || !pending.isEmpty) && Date() < deadline {
-            try? await Task.sleep(for: .milliseconds(250))
+            try? await Task.sleep(for: .milliseconds(100))
         }
         return pending.isEmpty && !draining
     }

@@ -148,5 +148,45 @@ class GenerationFailureTests(unittest.TestCase):
         self.assertEqual(model.generate.call_count, 1)
 
 
+class WarmupAndScratchPolicyTests(unittest.TestCase):
+    def test_select_warmup_voice_uses_configured_or_falls_back_safely(self):
+        from unittest.mock import patch
+
+        with patch.object(server, "WARMUP_VOICE", "af_bella"):
+            self.assertEqual(server._select_warmup_voice(), ("af_bella", "a"))
+        with patch.object(server, "WARMUP_VOICE", "bf_lily"):
+            self.assertEqual(server._select_warmup_voice(), ("bf_lily", "b"))
+        with patch.object(server, "WARMUP_VOICE", "../bad-voice"):
+            self.assertEqual(server._select_warmup_voice(), ("af_heart", "a"))
+
+    def test_release_model_scratch_flushes_periodically_or_on_force(self):
+        import sys
+        from unittest.mock import patch, Mock
+
+        fake_mx = Mock()
+        fake_mx.get_cache_memory.return_value = 1024
+        fake_mx.clear_cache = Mock()
+        fake_mlx = Mock()
+        fake_mlx.core = fake_mx
+        original_count = server.generations_since_flush
+        try:
+            server.generations_since_flush = 0
+            with patch.dict(sys.modules, {"mlx": fake_mlx, "mlx.core": fake_mx}):
+                # Normal request below flush interval and cache cap: no Metal flush.
+                server._release_model_scratch(force=False)
+                self.assertEqual(fake_mx.clear_cache.call_count, 0)
+
+                # Forced cleanup (cancel/error) flushes immediately.
+                server._release_model_scratch(force=True)
+                self.assertEqual(fake_mx.clear_cache.call_count, 1)
+
+                # High cache memory triggers immediate flush even when force=False.
+                fake_mx.get_cache_memory.return_value = server.MLX_CACHE_CAP_BYTES + 1
+                server._release_model_scratch(force=False)
+                self.assertEqual(fake_mx.clear_cache.call_count, 2)
+        finally:
+            server.generations_since_flush = original_count
+
+
 if __name__ == "__main__":
     unittest.main()
