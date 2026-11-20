@@ -2,9 +2,14 @@ import Foundation
 
 // Shared back-end (normalize.py `_phase0` … `_phaseD`). Source-agnostic.
 extension Normalizer {
+    private static func hasNonASCII(_ text: String) -> Bool {
+        !text.utf8.allSatisfy { $0 < 0x80 }
+    }
+
     // MARK: - Phase 0: universal typographic normalization
 
     static func phase0(_ input: String) -> String {
+        guard hasNonASCII(input) else { return input }
         var t = input
         t = t.replacingOccurrences(of: "\u{2212}", with: "-")     // minus sign
         t = t.replacingOccurrences(of: "\u{2026}", with: "...")   // ellipsis
@@ -20,15 +25,25 @@ extension Normalizer {
 
     // MARK: - Phase A: noise removal (URLs, DOIs, chemicals, citations)
 
+    private static let bareURLPattern: String = {
+        let tlds = #"(?:com|org|net|edu|io|gov|co|uk|de|fr|jp|au|ca|nl|ch|it|es|info|me|dev|app|ai)"#
+        return #"(?<!//)(?<!/)(?<!@)\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+"# + tlds + #"\b(?:/\S*)?"#
+    }()
+
+    private static let authorYearCitationPattern: String = {
+        let months = #"(?:January|February|March|April|May|June|July|August|September|October|November|December)"#
+        return #"\s*\((?:(?!"# + months + #")[A-Z][a-z]+(?:\s+(?:et\s+al\.|and\s+(?!"# + months
+            + #")[A-Z][a-z]+))?(?:,?\s*\d{4})\s*(?:;\s*(?!"# + months + #")[A-Z][a-z]+(?:\s+(?:et\s+al\.|and\s+(?!"#
+            + months + #")[A-Z][a-z]+))?(?:,?\s*\d{4})\s*)*)\)\s*"#
+    }()
+
     static func phaseA(_ input: String) -> String {
         var t = input
         t = t.sub(NormalizerData.chemPattern) { m in
             NormalizerData.chem[m.matched] ?? m.matched
         }
         // Bare URLs (no protocol): go.nature.com/4rzrnyx → "go dot nature dot com slash 4rzrnyx"
-        let tlds = #"(?:com|org|net|edu|io|gov|co|uk|de|fr|jp|au|ca|nl|ch|it|es|info|me|dev|app|ai)"#
-        t = t.sub(#"(?<!//)(?<!/)(?<!@)\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+"# + tlds + #"\b(?:/\S*)?"#,
-                  options: [.caseInsensitive]) { m in
+        t = t.sub(bareURLPattern, options: [.caseInsensitive]) { m in
             var s = m.matched
             var trail = ""
             while let last = s.last, ".,;:?!)]\"'".contains(last) {
@@ -56,37 +71,99 @@ extension Normalizer {
             return (m[1] ?? "") + " "
         }
         // Author-year citations: "(Smith et al., 2020; Lee and Kim, 2021)".
-        let months = #"(?:January|February|March|April|May|June|July|August|September|October|November|December)"#
-        t = t.sub(#"\s*\((?:(?!"# + months + #")[A-Z][a-z]+(?:\s+(?:et\s+al\.|and\s+(?!"# + months
-                  + #")[A-Z][a-z]+))?(?:,?\s*\d{4})\s*(?:;\s*(?!"# + months + #")[A-Z][a-z]+(?:\s+(?:et\s+al\.|and\s+(?!"#
-                  + months + #")[A-Z][a-z]+))?(?:,?\s*\d{4})\s*)*)\)\s*"#, " ")
+        t = t.sub(authorYearCitationPattern, " ")
         return t
     }
 
     // MARK: - Phase B: punctuation, abbreviations, Miller indices, currency
 
+    private static let millerContext =
+        #"planes?|reflections?|peaks?|indexed|facets?|diffraction|surfaces?|Miller|directions?"#
+    private static let millerBeforePattern = #"\b("# + millerContext + #")\s+\((\d{3})\)"#
+    private static let millerAfterPattern = #"\((\d{3})\)\s+("# + millerContext + #")\b"#
+    private static let millerListPattern: String = {
+        let millParen = #"\(\d(?:\s?\d){0,2}\)"#
+        return millParen + #"(?:\s*,\s*(?:and\s+)?"# + millParen + #"){1,}"#
+    }()
+
+    private static let abbrOrder: [(String, String)] = [
+        ("Sect.", "Section"), ("sect.", "section"), ("Ch.", "Chapter"), ("ch.", "chapter"),
+        ("Vol.", "Volume"), ("vol.", "volume"), ("Suppl.", "Supplementary"),
+        ("suppl.", "supplementary"), ("approx.", "approximately"), ("vs.", "versus"),
+        ("e.g.", "for example"), ("i.e.", "that is"), ("et al.", "et al"),
+        ("etc.", "et cetera"), ("cf.", "compare"), ("viz.", "namely"),
+        ("Dr.", "Doctor"), ("Prof.", "Professor"), ("Mr.", "Mister"), ("Mrs.", "Misses"),
+        ("Ms.", "Ms"), ("Sr.", "Senior"), ("Jr.", "Junior"), ("St.", "Saint"), ("Mt.", "Mount"),
+    ]
+    private static let abbrMap = Dictionary(uniqueKeysWithValues: abbrOrder)
+    private static let abbrPattern: String = {
+        let alt = lengthDescending(abbrOrder.map(\.0))
+            .map { NSRegularExpression.escapedPattern(for: $0) }
+            .joined(separator: "|")
+        return #"\b("# + alt + ")"
+    }()
+
+    private static let journalPattern: String = {
+        let jour = ["Nat", "Commun", "Phys", "Rev", "Lett", "Proc", "Natl", "Acad",
+                    "Sci", "Chem", "Soc", "Am", "Biol", "Med", "Eng", "Mater", "Appl", "Opt",
+                    "Mech", "Res", "Math", "Stat", "Astron", "Astrophys", "Geophys", "Nucl",
+                    "Mol", "Cell", "Genet", "Biochem", "Biophys", "Environ", "Technol", "Pharmacol"]
+        return #"(?:(?:"# + jour.joined(separator: "|") + #")\.(?:\s+|$)){2,}"#
+    }()
+
+    private static let pluralsMap: [String: String] = [
+        "Figure": "Figures", "Equation": "Equations", "Reference": "References",
+        "Section": "Sections", "Chapter": "Chapters", "Number": "Numbers",
+        "figure": "figures", "equation": "equations", "reference": "references",
+        "section": "sections", "chapter": "chapters", "number": "numbers",
+    ]
+
+    private static let currSym: [String: (String, String)] = [
+        "$": ("dollar", "dollars"), "€": ("euro", "euros"),
+        "£": ("pound", "pounds"), "¥": ("yen", "yen"), "₹": ("rupee", "rupees"),
+    ]
+    private static let currPfx: [String: String] = [
+        "US": "US", "A": "Australian", "AU": "Australian",
+        "C": "Canadian", "CA": "Canadian", "NZ": "New Zealand",
+        "HK": "Hong Kong", "S": "Singapore",
+    ]
+    private static let currencyPattern: String = {
+        let pfxAlt = lengthDescending(["US", "A", "AU", "C", "CA", "NZ", "HK", "S"]).joined(separator: "|")
+        let symAlt = ["$", "€", "£", "¥", "₹"]
+            .map { NSRegularExpression.escapedPattern(for: $0) }
+            .joined(separator: "|")
+        return #"(?<![A-Za-z])(?:("# + pfxAlt + #")\s*)?("# + symAlt
+            + #")\s*(\d[\d,]*(?:\.\d+)?)(?:(?:[-"# + "\u{2010}\u{2011}\u{2013}"
+            + #"]\s*|\s+)([Mm]illion|[Bb]illion|[Tt]rillion|[Tt]housand))?"#
+    }()
+
+    private static let pctMap: [String: String] = [
+        "wt": "percent by weight", "vol": "percent by volume",
+        "at": "atomic percent", "mol": "mole percent",
+    ]
+
     static func phaseB(_ input: String) -> String {
         var t = input
         // Arc-minutes/seconds in DMS notation.
-        t = t.sub("(\\d+)\u{2032}\\s*(\\d+)\u{2033}", "$1 arc minutes $2 arc seconds")
-        t = t.sub("(\\d+\u{00b0}\\s*)(\\d+)\u{2032}") { m in
-            (m[1] ?? "") + (m[2] ?? "") + " arc minutes"
+        if hasNonASCII(t) {
+            t = t.sub("(\\d+)\u{2032}\\s*(\\d+)\u{2033}", "$1 arc minutes $2 arc seconds")
+            t = t.sub("(\\d+\u{00b0}\\s*)(\\d+)\u{2032}") { m in
+                (m[1] ?? "") + (m[2] ?? "") + " arc minutes"
+            }
+            t = t.replacingOccurrences(of: "\u{2032}", with: "'")
+            t = t.replacingOccurrences(of: "\u{2033}", with: "\"")
         }
-        t = t.replacingOccurrences(of: "\u{2032}", with: "'")
-        t = t.replacingOccurrences(of: "\u{2033}", with: "\"")
         // Miller indices: parenthesized digit groups read digit-by-digit.
         t = t.sub(#"\(0(\d{1,2})\)"#) { m in
             "(" + ("0" + (m[1] ?? "")).map(String.init).joined(separator: " ") + ")"
         }
-        let millerContext = #"planes?|reflections?|peaks?|indexed|facets?|diffraction|surfaces?|Miller|directions?"#
-        t = t.sub(#"\b("# + millerContext + #")\s+\((\d{3})\)"#) { m in
+        t = t.sub(millerBeforePattern) { m in
             (m[1] ?? "") + " (" + (m[2] ?? "").map(String.init).joined(separator: " ") + ")"
         }
-        t = t.sub(#"\((\d{3})\)\s+("# + millerContext + #")\b"#) { m in
+        t = t.sub(millerAfterPattern) { m in
             "(" + (m[1] ?? "").map(String.init).joined(separator: " ") + ") " + (m[2] ?? "")
         }
-        let millParen = #"\(\d(?:\s?\d){0,2}\)"#
-        t = t.sub(millParen + #"(?:\s*,\s*(?:and\s+)?"# + millParen + #"){1,}"#) { m in
+        t = t.sub(millerListPattern) { m in
             m.matched.sub(#"\((\d{1,3})\)"#) { inner in
                 "(" + (inner[1] ?? "").map(String.init).joined(separator: " ") + ")"
             }
@@ -104,56 +181,18 @@ extension Normalizer {
         t = t.sub(#"\brefs?\."#) { m in m.matched.hasPrefix("refs") ? "references" : "reference" }
         t = t.sub(#"\bNo\.(?=\s*\d)"#, "Number")
         t = t.sub(#"\bno\.(?=\s*\d)"#, "number")
-        let abbrOrder: [(String, String)] = [
-            ("Sect.", "Section"), ("sect.", "section"), ("Ch.", "Chapter"), ("ch.", "chapter"),
-            ("Vol.", "Volume"), ("vol.", "volume"), ("Suppl.", "Supplementary"),
-            ("suppl.", "supplementary"), ("approx.", "approximately"), ("vs.", "versus"),
-            ("e.g.", "for example"), ("i.e.", "that is"), ("et al.", "et al"),
-            ("etc.", "et cetera"), ("cf.", "compare"), ("viz.", "namely"),
-            ("Dr.", "Doctor"), ("Prof.", "Professor"), ("Mr.", "Mister"), ("Mrs.", "Misses"),
-            ("Ms.", "Ms"), ("Sr.", "Senior"), ("Jr.", "Junior"), ("St.", "Saint"), ("Mt.", "Mount"),
-        ]
-        let abbrMap = Dictionary(uniqueKeysWithValues: abbrOrder)
-        let abbrAlt = lengthDescending(abbrOrder.map(\.0))
-            .map { NSRegularExpression.escapedPattern(for: $0) }
-            .joined(separator: "|")
-        t = t.sub(#"\b("# + abbrAlt + ")") { m in abbrMap[m.matched] ?? m.matched }
+        t = t.sub(abbrPattern) { m in abbrMap[m.matched] ?? m.matched }
         // Journal abbreviation chains (2+ in sequence lose their periods).
-        let jour = ["Nat", "Commun", "Phys", "Rev", "Lett", "Proc", "Natl", "Acad",
-                    "Sci", "Chem", "Soc", "Am", "Biol", "Med", "Eng", "Mater", "Appl", "Opt",
-                    "Mech", "Res", "Math", "Stat", "Astron", "Astrophys", "Geophys", "Nucl",
-                    "Mol", "Cell", "Genet", "Biochem", "Biophys", "Environ", "Technol", "Pharmacol"]
-        t = t.sub(#"(?:(?:"# + jour.joined(separator: "|") + #")\.(?:\s+|$)){2,}"#) { m in
+        t = t.sub(journalPattern) { m in
             m.matched.replacingOccurrences(of: ".", with: "")
         }
         // Abbreviation+citation ranges: Figures 1–3 → Figures 1 through 3.
-        let plurals: [String: String] = [
-            "Figure": "Figures", "Equation": "Equations", "Reference": "References",
-            "Section": "Sections", "Chapter": "Chapters", "Number": "Numbers",
-            "figure": "figures", "equation": "equations", "reference": "references",
-            "section": "sections", "chapter": "chapters", "number": "numbers",
-        ]
         t = t.sub("\\b(Figures?|Equations?|References?|Sections?|Chapters?|Numbers?|figures?|equations?|references?|sections?|chapters?|numbers?)\\s*(\\d+)\\s*[-\u{2013}\u{2014}]\\s*(\\d+)") { m in
-            let label = plurals[m[1] ?? ""] ?? (m[1] ?? "")
+            let label = pluralsMap[m[1] ?? ""] ?? (m[1] ?? "")
             return label + " " + (m[2] ?? "") + " through " + (m[3] ?? "")
         }
         // Currency: US$10-million → 10 million US dollars.
-        let currSym: [String: (String, String)] = [
-            "$": ("dollar", "dollars"), "€": ("euro", "euros"),
-            "£": ("pound", "pounds"), "¥": ("yen", "yen"), "₹": ("rupee", "rupees"),
-        ]
-        let currPfx: [String: String] = [
-            "US": "US", "A": "Australian", "AU": "Australian",
-            "C": "Canadian", "CA": "Canadian", "NZ": "New Zealand",
-            "HK": "Hong Kong", "S": "Singapore",
-        ]
-        let pfxAlt = lengthDescending(["US", "A", "AU", "C", "CA", "NZ", "HK", "S"]).joined(separator: "|")
-        let symAlt = ["$", "€", "£", "¥", "₹"]
-            .map { NSRegularExpression.escapedPattern(for: $0) }
-            .joined(separator: "|")
-        t = t.sub(#"(?<![A-Za-z])(?:("# + pfxAlt + #")\s*)?("# + symAlt
-                  + #")\s*(\d[\d,]*(?:\.\d+)?)(?:(?:[-"# + "\u{2010}\u{2011}\u{2013}"
-                  + #"]\s*|\s+)([Mm]illion|[Bb]illion|[Tt]rillion|[Tt]housand))?"#) { m in
+        t = t.sub(currencyPattern) { m in
             let pfx = m[1]
             let sym = m[2] ?? "$"
             let amt = m[3] ?? ""
@@ -168,9 +207,11 @@ extension Normalizer {
             return parts.joined(separator: " ")
         }
         // Numeric ranges: en/em-dash between digits → X to Y.
-        t = t.sub("(\\d[\\d.,]*)\\s*[\u{2013}\u{2014}]\\s*(\\d[\\d.,]*)", "$1 to $2")
-        // Remaining en/em-dash (pauses, asides).
-        t = t.sub(" ?[\u{2014}\u{2013}] ?", " -- ")
+        if hasNonASCII(t) {
+            t = t.sub("(\\d[\\d.,]*)\\s*[\u{2013}\u{2014}]\\s*(\\d[\\d.,]*)", "$1 to $2")
+            // Remaining en/em-dash (pauses, asides).
+            t = t.sub(" ?[\u{2014}\u{2013}] ?", " -- ")
+        }
         t = t.sub(#" ?-{2,3} ?"#, " -- ")
         // Math operators.
         t = t.sub(#" <= "#, " less than or equal to ")
@@ -182,10 +223,8 @@ extension Normalizer {
         t = t.sub(#"\s*~(?=\s?\d)"#, " approximately ")
         t = t.sub(#"~(?!/)"#, " ")
         // Compound percentage forms (before bare % rule).
-        let pct: [String: String] = ["wt": "percent by weight", "vol": "percent by volume",
-                                     "at": "atomic percent", "mol": "mole percent"]
         t = t.sub(#"(\d+(?:\.\d+)?)\s*(wt|vol|at|mol)\s*%"#) { m in
-            (m[1] ?? "") + " " + (pct[m[2] ?? ""] ?? "")
+            (m[1] ?? "") + " " + (pctMap[m[2] ?? ""] ?? "")
         }
         t = t.sub(#"(\d+(?:\.\d+)?)\s*%"#, "$1 percent")
         // DNA prime notation.
@@ -236,6 +275,9 @@ extension Normalizer {
         ("K", "kelvins"), ("mol", "moles"), ("Hz", "hertz"), ("Ohm", "ohms"),
         ("\u{03a9}", "ohms"), ("M", "molar"),
     ]
+    private static let microUnitsSorted: [(String, String)] = microUnits.enumerated()
+        .sorted { ($0.element.0.count, $1.offset) > ($1.element.0.count, $0.offset) }
+        .map(\.element)
 
     /// _SI (insertion order preserved for alternation parity).
     private static let siOrder: [(String, String)] = [
@@ -268,77 +310,90 @@ extension Normalizer {
         ("K", "kelvins"), ("V", "volts"), ("W", "watts"), ("J", "joules"),
         ("L", "liters"),
     ]
-
-    static func phaseC(_ input: String) -> String {
-        var t = input
-        // Bra-ket notation.
-        t = t.sub("\u{27e8}([^\u{27e9}]*)\u{27e9}") { m in
-            (m[1] ?? "").replacingOccurrences(of: "|", with: " ")
-        }
-        // Single-character symbols to spoken form.
-        for (sym, word) in symbolTable {
-            t = t.replacingOccurrences(of: sym, with: word)
-        }
-        // Degree+letter units (must precede bare degree).
-        t = t.sub("(?<=\\d)\\s*\u{00b0}C\\b", " degrees Celsius")
-        t = t.sub("(?<=\\d)\\s*\u{00b0}F\\b", " degrees Fahrenheit")
-        t = t.sub("(?<=\\d)\\s*\u{00b0}K\\b", " degrees Kelvin")
-        t = t.sub("(?<=\\d)\\s*\u{00b0}(?=\\s|$|[.,;:?!])", " degrees")
-        // Micro prefix: both µ (U+00B5) and μ (U+03BC).
-        let microSorted = microUnits.enumerated()
-            .sorted { ($0.element.0.count, $1.offset) > ($1.element.0.count, $0.offset) }
-            .map(\.element)
-        for prefix in ["\u{00b5}", "\u{03bc}"] {
-            for (u, w) in microSorted {
-                t = t.replacingOccurrences(of: prefix + u, with: "micro" + w)
-            }
-            if t.contains(prefix) {
-                t = t.sub(NSRegularExpression.escapedPattern(for: prefix) + #"(\w)"#, "micro-$1")
-            }
-        }
-        // SI prefix+unit abbreviations after numbers.
-        let si = Dictionary(uniqueKeysWithValues: siOrder)
-        let siAlt = lengthDescending(siOrder.map(\.0)).joined(separator: "|")
-        t = t.sub(#"(?<=\d)\s*("# + siAlt + #")\b"#) { m in
-            " " + (si[m[1] ?? ""] ?? "")
-        }
-        // Unit separator: slash -> per.
-        let unitEnds = Set(si.values.map { $0.components(separatedBy: " ").last! })
+    private static let siMap = Dictionary(uniqueKeysWithValues: siOrder)
+    private static let siSingularMap: [String: String] = siMap.mapValues { v in
+        v.hasSuffix("s") && v != "siemens" ? String(v.dropLast()) : v
+    }
+    private static let siAlt: String = lengthDescending(siOrder.map(\.0)).joined(separator: "|")
+    private static let siAfterDigitPattern: String = #"(?<=\d)\s*("# + siAlt + #")\b"#
+    private static let siAfterPerPattern: String = #"(?<=per )("# + siAlt + #")\b"#
+    private static let unitSlashPattern: String = {
+        let unitEnds = Set(siMap.values.map { $0.components(separatedBy: " ").last! })
             .union(microUnits.map { "micro" + $0.1 })
         let unitEndsAlt = lengthDescending(Array(unitEnds))
             .map { NSRegularExpression.escapedPattern(for: $0) }
             .joined(separator: "|")
-        t = t.sub(#"\b("# + unitEndsAlt + #")/([a-zA-Z])"#, "$1 per $2")
+        return #"\b("# + unitEndsAlt + #")/([a-zA-Z])"#
+    }()
+    private static let greekCompoundPattern: String = {
+        let gk = "alpha|beta|gamma|delta|epsilon|zeta|eta|theta|iota|kappa|lambda|mu|nu|xi|omicron|pi|rho|sigma|tau|upsilon|phi|chi|psi|omega"
+        return #"(\b(?:"# + gk + #"))\s+-\s*([a-z])"#
+    }()
+    private static let romanAlt: String = lengthDescending(Array(romanValues.keys)).joined(separator: "|")
+    private static let romanParenPattern: String = #"\(("# + romanAlt + #")\)"#
+    private static let romanComplexPattern: String = #"\b(Complex|Subunit|Chain|Type|Class)\s+("# + romanAlt + #")\b"#
+
+    static func phaseC(_ input: String) -> String {
+        var t = input
+        let nonASCII = hasNonASCII(t)
+        if nonASCII {
+            // Bra-ket notation.
+            t = t.sub("\u{27e8}([^\u{27e9}]*)\u{27e9}") { m in
+                (m[1] ?? "").replacingOccurrences(of: "|", with: " ")
+            }
+            // Single-character symbols to spoken form.
+            for (sym, word) in symbolTable {
+                t = t.replacingOccurrences(of: sym, with: word)
+            }
+            // Degree+letter units (must precede bare degree).
+            t = t.sub("(?<=\\d)\\s*\u{00b0}C\\b", " degrees Celsius")
+            t = t.sub("(?<=\\d)\\s*\u{00b0}F\\b", " degrees Fahrenheit")
+            t = t.sub("(?<=\\d)\\s*\u{00b0}K\\b", " degrees Kelvin")
+            t = t.sub("(?<=\\d)\\s*\u{00b0}(?=\\s|$|[.,;:?!])", " degrees")
+            // Micro prefix: both µ (U+00B5) and μ (U+03BC).
+            for prefix in ["\u{00b5}", "\u{03bc}"] {
+                guard t.contains(prefix) else { continue }
+                for (u, w) in microUnitsSorted {
+                    t = t.replacingOccurrences(of: prefix + u, with: "micro" + w)
+                }
+                if t.contains(prefix) {
+                    t = t.sub(NSRegularExpression.escapedPattern(for: prefix) + #"(\w)"#, "micro-$1")
+                }
+            }
+        }
+        // SI prefix+unit abbreviations after numbers.
+        t = t.sub(siAfterDigitPattern) { m in
+            " " + (siMap[m[1] ?? ""] ?? "")
+        }
+        // Unit separator: slash -> per.
+        t = t.sub(unitSlashPattern, "$1 per $2")
         t = t.sub(#"(?<=\d)(\s*)(m|s|g|A|N)/([a-zA-Z])"#, "$1$2 per $3")
         // Expand denominator units after "per" (singular form).
-        let siSingular = si.mapValues { v in
-            v.hasSuffix("s") && v != "siemens" ? String(v.dropLast()) : v
+        t = t.sub(siAfterPerPattern) { m in
+            siSingularMap[m[1] ?? ""] ?? (m[1] ?? "")
         }
-        t = t.sub(#"(?<=per )("# + siAlt + #")\b"#) { m in
-            siSingular[m[1] ?? ""] ?? (m[1] ?? "")
-        }
-        // Ohm: number + Ω.
-        t = t.sub("(?<=\\d)\\s*[\u{2126}\u{03a9}](?=\\s|$|[.,;:?!)])", " ohms")
-        // Greek letters (α → " alpha " etc.; final sigma and accented forms
-        // fold to their base letter, matching unicodedata-name derivation).
-        t = t.sub("[\u{0391}-\u{03c9}]") { m in
-            guard let word = greekLetterNames[m.matched] else { return m.matched }
-            return " " + word + " "
+        if nonASCII {
+            // Ohm: number + Ω.
+            t = t.sub("(?<=\\d)\\s*[\u{2126}\u{03a9}](?=\\s|$|[.,;:?!)])", " ohms")
+            // Greek letters (α → " alpha " etc.; final sigma and accented forms
+            // fold to their base letter, matching unicodedata-name derivation).
+            t = t.sub("[\u{0391}-\u{03c9}]") { m in
+                guard let word = greekLetterNames[m.matched] else { return m.matched }
+                return " " + word + " "
+            }
         }
         // Greek compound fix: alpha -helix -> alpha-helix.
-        let gk = "alpha|beta|gamma|delta|epsilon|zeta|eta|theta|iota|kappa|lambda|mu|nu|xi|omicron|pi|rho|sigma|tau|upsilon|phi|chi|psi|omega"
-        t = t.sub(#"(\b(?:"# + gk + #"))\s+-\s*([a-z])"#, "$1-$2", [.caseInsensitive])
+        t = t.sub(greekCompoundPattern, "$1-$2", [.caseInsensitive])
         // Roman numerals after labels.
         t = t.sub(#"\b(Section|Chapter|Part|Article|Item|Figure|Table|Act|Vol|No)(\s+)((?:X{0,3})(?:IX|IV|V?I{0,3}))\b"#) { m in
             (m[1] ?? "") + (m[2] ?? "") + (romanValues[m[3] ?? ""] ?? (m[3] ?? ""))
         }
         // Oxidation states.
-        let rvAlt = lengthDescending(Array(romanValues.keys)).joined(separator: "|")
-        t = t.sub(#"\(("# + rvAlt + #")\)"#) { m in
+        t = t.sub(romanParenPattern) { m in
             "(" + (romanValues[m[1] ?? ""] ?? (m[1] ?? "")) + ")"
         }
         // Numbered protein complexes.
-        t = t.sub(#"\b(Complex|Subunit|Chain|Type|Class)\s+("# + rvAlt + #")\b"#) { m in
+        t = t.sub(romanComplexPattern) { m in
             (m[1] ?? "") + " " + (romanValues[m[2] ?? ""] ?? (m[2] ?? ""))
         }
         return t

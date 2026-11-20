@@ -109,6 +109,33 @@ private final class LockedTestFlag: @unchecked Sendable {
         #expect(await janitor.pendingIDs == ["history-1"])
         #expect(await janitor.waitUntilDrained(timeout: 1))
     }
+
+    @Test func retryingItemDoesNotHeadOfLineBlockReadyItems() async throws {
+        final class Recorder: @unchecked Sendable {
+            private let lock = NSLock()
+            var deletedOrder: [String] = []
+            var attempts: [String: Int] = [:]
+            func handle(_ id: String) -> Int {
+                lock.withLock {
+                    let count = (attempts[id] ?? 0) + 1
+                    attempts[id] = count
+                    if id == "slow-404" && count == 1 { return 404 }
+                    deletedOrder.append(id)
+                    return 200
+                }
+            }
+            func snapshot() -> [String] { lock.withLock { deletedOrder } }
+        }
+        let recorder = Recorder()
+        let janitor = HistoryJanitor(initialDelay: 0, retryDelays: [0.35]) { id in
+            recorder.handle(id)
+        }
+        await janitor.enqueue("slow-404")
+        await janitor.enqueue("ready-2")
+        #expect(await janitor.waitUntilDrained(timeout: 2))
+        // `ready-2` must finish BEFORE `slow-404`'s 350 ms retry fires.
+        #expect(recorder.snapshot() == ["ready-2", "slow-404"])
+    }
 }
 
 @Suite struct PlaybackCompletionPolicyTests {
@@ -162,6 +189,20 @@ private final class LockedTestFlag: @unchecked Sendable {
         ledger.overriddenToday = true
         #expect(ledger.verdict() == .ok)
     }
+
+    @Test func concurrentRecordingIsThreadSafeAndIgnoresNegatives() async {
+        let ledger = freshLedger()
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<20 {
+                group.addTask {
+                    ledger.record(billedCharacters: 10)
+                    ledger.record(billedCharacters: -50)
+                    _ = ledger.spentToday
+                }
+            }
+        }
+        #expect(ledger.spentToday == 200)
+    }
 }
 
 @Suite final class AudioCacheTests {
@@ -212,8 +253,29 @@ private final class LockedTestFlag: @unchecked Sendable {
                                  modelID: "m", settings: VoiceSettings())
         cache.store(key, data: Data([1, 2, 3]))
         cache.purge()
+        // Pending in-memory writes must vanish immediately on purge, before
+        // even waiting for the async disk sweep.
+        #expect(cache.lookup(key) == nil)
         try await Task.sleep(for: .milliseconds(200))
         #expect(cache.lookup(key) == nil)
+    }
+
+    @Test func optionalContextAndFormatPreserveDefaultKeyCompatibility() {
+        let base = AudioCache.key(text: "hello", provider: "elevenlabs",
+                                  voiceID: "v1", modelID: "m1", settings: VoiceSettings())
+        let same = AudioCache.key(text: "hello", provider: "elevenlabs",
+                                  voiceID: "v1", modelID: "m1", settings: VoiceSettings(),
+                                  previousContext: "", outputFormat: nil)
+        let withCtx = AudioCache.key(text: "hello", provider: "elevenlabs",
+                                     voiceID: "v1", modelID: "m1", settings: VoiceSettings(),
+                                     previousContext: "Prior sentence.", outputFormat: nil)
+        let withFmt = AudioCache.key(text: "hello", provider: "elevenlabs",
+                                     voiceID: "v1", modelID: "m1", settings: VoiceSettings(),
+                                     previousContext: "", outputFormat: "mp3_44100_64")
+        #expect(base == same)
+        #expect(base != withCtx)
+        #expect(base != withFmt)
+        #expect(withCtx != withFmt)
     }
 
     @Test func disabledCacheStoresNothing() async throws {

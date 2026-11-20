@@ -5,10 +5,10 @@ import Darwin
 /// Content-addressed audio cache (P-10, F-9, C-4).
 ///
 /// Key: SHA-256(normalized chunk text · provider · voice · model · voice
-/// settings). Filenames are hashes — never text. Lives in
-/// `~/Library/Application Support/sr/cache/`. LRU eviction over a size cap
-/// (default 500 MB) plus a TTL (default 30 days). At-rest encryption is
-/// FileVault's job (documented assumption).
+/// settings [· optional context / format]). Filenames are hashes — never text.
+/// Lives in `~/Library/Application Support/sr/cache/`. LRU eviction over a
+/// size cap (default 500 MB) plus a TTL (default 30 days). At-rest encryption
+/// is FileVault's job (documented assumption).
 public final class AudioCache: @unchecked Sendable {
     public static let shared = AudioCache()
 
@@ -117,14 +117,25 @@ public final class AudioCache: @unchecked Sendable {
     // MARK: - Keying
 
     public static func key(text: String, provider: String, voiceID: String,
-                           modelID: String, settings: VoiceSettings) -> String {
+                           modelID: String, settings: VoiceSettings,
+                           previousContext: String = "",
+                           outputFormat: String? = nil) -> String {
         var hasher = SHA256()
         // \u{1F} separators prevent field-boundary collisions.
-        let material = [
+        var parts = [
             text, provider, voiceID, modelID,
             String(settings.stability), String(settings.similarityBoost),
             String(settings.style), String(settings.useSpeakerBoost),
-        ].joined(separator: "\u{1F}")
+        ]
+        // Only extend the material when optional dimensions are active so
+        // legacy/default calls produce identical cache keys.
+        if !previousContext.isEmpty {
+            parts.append("ctx:" + previousContext)
+        }
+        if let outputFormat, !outputFormat.isEmpty {
+            parts.append("fmt:" + outputFormat)
+        }
+        let material = parts.joined(separator: "\u{1F}")
         hasher.update(data: Data(material.utf8))
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
@@ -147,9 +158,11 @@ public final class AudioCache: @unchecked Sendable {
             SRLog.event("cache.miss", [:])
             return nil
         }
-        // Touch mtime for LRU.
-        try? FileManager.default.setAttributes([.modificationDate: Date()],
-                                               ofItemAtPath: file.path)
+        // Touch mtime off the hot playback path so cache hits stay pure reads.
+        queue.async {
+            try? FileManager.default.setAttributes([.modificationDate: Date()],
+                                                   ofItemAtPath: file.path)
+        }
         SRLog.event("cache.hit", ["bytes": String(data.count)])
         return data
     }
@@ -210,9 +223,15 @@ public final class AudioCache: @unchecked Sendable {
 
     // MARK: - Maintenance
 
-    /// One-click "Purge cache" (P-10).
+    /// One-click "Purge cache" (P-10). Clears in-memory pending writes
+    /// immediately so purged entries cannot still hit while the disk sweep runs.
     public func purge() {
+        stateLock.withLock {
+            pendingWrites.removeAll()
+        }
         queue.async { [self] in
+            evictionWorkItem?.cancel()
+            evictionWorkItem = nil
             let fm = FileManager.default
             for entry in (try? fm.contentsOfDirectory(at: directory,
                             includingPropertiesForKeys: nil)) ?? [] {

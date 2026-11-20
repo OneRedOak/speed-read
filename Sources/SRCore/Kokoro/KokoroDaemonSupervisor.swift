@@ -22,6 +22,11 @@ public actor KokoroDaemonSupervisor {
 
     public var socketPath: String { paths.socketPath }
 
+    /// Whether a daemon socket is currently reachable.
+    public var isRunning: Bool {
+        Self.socketConnectable(paths.socketPath)
+    }
+
     public enum SupervisorError: Error {
         case notInstalled
         case spawnFailed(String)
@@ -31,7 +36,7 @@ public actor KokoroDaemonSupervisor {
 
     /// Ensure a healthy daemon is running. Returns when the socket is
     /// connectable. Throws SupervisorError on failure.
-    public func ensureRunning() async throws {
+    public func ensureRunning(warmupVoice: String? = nil) async throws {
         // Already healthy? Accept a connectable socket even when we didn't
         // spawn the daemon (another sr process — GUI vs CLI — owns it; the
         // shared token file makes it usable, and the flock guard would make
@@ -66,16 +71,24 @@ public actor KokoroDaemonSupervisor {
                     try await Task.sleep(for: .seconds(delay - elapsed))
                 }
             }
-            try await spawn()
+            try await spawn(warmupVoice: warmupVoice)
         }
         startupTask = task
         defer { startupTask = nil }
         try await task.value
     }
 
+    /// Explicitly restart the managed daemon (e.g., from Settings after an update).
+    public func restart(warmupVoice: String? = nil) async throws {
+        stop()
+        consecutiveFailures = 0
+        lastSpawnAttempt = nil
+        try await ensureRunning(warmupVoice: warmupVoice)
+    }
+
     private var startupTask: Task<Void, Error>?
 
-    private func spawn(retryOnLockConflict: Bool = true) async throws {
+    private func spawn(warmupVoice: String? = nil, retryOnLockConflict: Bool = true) async throws {
         stopProcess()
 
         lastSpawnAttempt = Date()
@@ -92,12 +105,14 @@ public actor KokoroDaemonSupervisor {
         p.executableURL = paths.venvPython
         p.arguments = [paths.daemonScript.path, "--managed"]
         var env = ["SR_DAEMON_TOKEN": token]
+        if let warmupVoice, !warmupVoice.isEmpty {
+            env["SR_WARMUP_VOICE"] = warmupVoice
+        }
         // P-12: hand the daemon the installer's hash-verified snapshot so it
         // runs exactly the verified bytes, not whatever the HF cache resolves
         // the model ID to. Passed via a stable "Kokoro-82M-bf16" symlink —
         // mlx-audio derives the model TYPE from the basename, so the raw
-        // snapshot dir (named by revision hash) would not load. Missing/stale
-        // manifest → no env var → daemon falls back to the model ID.
+        // snapshot dir (named by revision hash) would not load.
         let fm = FileManager.default
         let manifest: KokoroInstaller.Manifest
         do {
@@ -135,6 +150,7 @@ public actor KokoroDaemonSupervisor {
         SRLog.event("kokoro.daemon_spawn", ["pid": String(p.processIdentifier)])
 
         // Wait for the socket (cold start loads the model: allow 60 s).
+        // 100 ms polling shaves up to 400 ms off cold-start TTFA vs 500 ms.
         let deadline = Date().addingTimeInterval(60)
         while Date() < deadline {
             if Self.socketConnectable(paths.socketPath) {
@@ -158,7 +174,7 @@ public actor KokoroDaemonSupervisor {
                             SRLog.event("kokoro.daemon_ready", ["via": "existing"])
                             return
                         }
-                        try await Task.sleep(for: .milliseconds(500))
+                        try await Task.sleep(for: .milliseconds(150))
                     }
                     // Lock holder never produced a socket — likely finished
                     // dying; one respawn attempt. Bounded: a second conflict
@@ -168,14 +184,14 @@ public actor KokoroDaemonSupervisor {
                     guard retryOnLockConflict else {
                         throw SupervisorError.startupTimeout
                     }
-                    try await spawn(retryOnLockConflict: false)
+                    try await spawn(warmupVoice: warmupVoice, retryOnLockConflict: false)
                     return
                 }
                 consecutiveFailures += 1
                 throw SupervisorError.spawnFailed(
                     "daemon exited during startup (status \(p.terminationStatus))")
             }
-            try await Task.sleep(for: .milliseconds(500))
+            try await Task.sleep(for: .milliseconds(100))
         }
         consecutiveFailures += 1
         stopProcess()

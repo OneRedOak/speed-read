@@ -12,8 +12,8 @@ Security model (P-9):
     connection is refused.
 
 Protocol (one JSON object per line, UTF-8):
-  request:  {"token": "<hex>", "text": "...", "voice": "bf_lily",
-             "speed": "1.0", "lang_code": "b"}
+  request:  {"token": "<hex>", "text": "...", "voice": "af_heart",
+             "speed": "1.0", "lang_code": "a"}
   response: {"status": "ok", "audio_file": "/abs/path.wav"}
         or  {"status": "error", "message": "..."}
   The CLIENT owns the returned WAV file and its parent temp directory and
@@ -28,8 +28,14 @@ Logging is content-free (P-5): text lengths only, never text.
 """
 
 import fcntl
+import gc
+import glob
 import json
+import math
 import os
+import re
+import select
+import shutil
 import signal
 import socket
 import sys
@@ -46,6 +52,7 @@ LOCK_FILE = os.path.join(DATA_DIR, "daemon.lock")
 TMP_ROOT = os.path.join(DATA_DIR, "tmp")
 LOG_DIR = os.path.expanduser("~/Library/Logs/sr")
 LOG_FILE = os.path.join(LOG_DIR, "kokoro.log")
+LOG_MAX_BYTES = 5_000_000
 
 MODEL_ID = "mlx-community/Kokoro-82M-bf16"
 # Must match the client cache namespace: old processes may outlive an update.
@@ -55,6 +62,10 @@ OUTPUT_VERSION = "kokoro-82M-t3"
 # hash-verified snapshot directory so the daemon runs exactly the bytes
 # that were checked — never whatever the HF cache resolves MODEL_ID to.
 MODEL_PATH = os.environ.get("SR_MODEL_PATH", "")
+
+# Warm up the user's selected voice + language pipeline so the very first
+# sentence doesn't pay a cold G2P / spaCy / Metal kernel load.
+WARMUP_VOICE = os.environ.get("SR_WARMUP_VOICE", "af_heart")
 
 # Requests are single sentences (the client chunks upstream); 1 MB is
 # orders of magnitude above any legitimate request line.
@@ -69,19 +80,34 @@ MAX_REQUEST_BYTES = 1_000_000
 TRIM_THRESHOLD_RATIO = 0.005
 TRIM_PAD_SECONDS = 0.06
 
+# Bounded Metal scratch-cache flush policy: flushing on every single sentence
+# costs ~50–150 ms of full Python GC + Metal VM reallocation per chunk.
+# Flush periodically, on cancellation/error, or whenever cached GPU memory
+# crosses the cap.
+MLX_CACHE_FLUSH_EVERY = 8
+MLX_CACHE_CAP_BYTES = 256 * 1024 * 1024
+
 # Idle timeout in seconds (non-managed mode).
 IDLE_TIMEOUT = int(os.environ.get("SR_IDLE_TIMEOUT", "300"))
 
 # Per-launch auth token (required).
 AUTH_TOKEN = os.environ.get("SR_DAEMON_TOKEN", "")
 
+VOICE_RE = re.compile(r"[a-z0-9_]{1,32}")
+LANG_RE = re.compile(r"[a-z]")
+
 # ── Logging (content-free, P-5) ──────────────────────────────────────
 
 
 def log(msg):
-    """Append a timestamped line to the log. Never log request text."""
+    """Append a timestamped line to the rotating log. Never log request text."""
     try:
         os.makedirs(LOG_DIR, exist_ok=True)
+        try:
+            if os.path.getsize(LOG_FILE) > LOG_MAX_BYTES:
+                os.replace(LOG_FILE, LOG_FILE + ".1")
+        except OSError:
+            pass
         with open(LOG_FILE, "a") as f:
             f.write(
                 f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] sr_tts_server: {msg}\n"
@@ -101,6 +127,7 @@ generation_lock = threading.Lock()
 client_slots = threading.BoundedSemaphore(16)
 activity_lock = threading.Lock()
 active_clients = 0
+generations_since_flush = 0
 
 # ── Model ────────────────────────────────────────────────────────────
 
@@ -120,11 +147,18 @@ def load_tts_model():
     log("model loaded")
 
 
+def _select_warmup_voice():
+    voice = WARMUP_VOICE if VOICE_RE.fullmatch(WARMUP_VOICE) else "af_heart"
+    lang = voice[0] if LANG_RE.fullmatch(voice[:1]) else "a"
+    return voice, lang
+
+
 def warmup_pipeline():
-    """Pre-cache the language pipeline so the first real request is fast."""
+    """Pre-cache the active voice + language pipeline so the first real request is fast."""
+    voice, lang = _select_warmup_voice()
     try:
-        log("warming up pipeline")
-        for _ in model.generate(text=".", voice="bf_lily", speed=1.0, lang_code="b"):
+        log(f"warming up pipeline voice={voice} lang={lang}")
+        for _ in model.generate(text=".", voice=voice, speed=1.0, lang_code=lang):
             pass
         log("pipeline warm")
     except Exception as e:
@@ -152,8 +186,10 @@ def _generate_segments(text, voice, speed, lang_code, cancel_check, depth=0):
             if cancel_check and cancel_check():
                 raise CancelledError("client disconnected")
             # Materialize inside the try so the workaround also catches
-            # errors raised lazily during generation.
-            segments.append((np.array(result.audio), result.sample_rate))
+            # errors raised lazily during generation. Flatten defensively in
+            # case a runtime returns (1, N) instead of (N,).
+            arr = np.asarray(result.audio, dtype=np.float32).reshape(-1)
+            segments.append((arr, result.sample_rate))
         return segments
     except ValueError as e:
         if "broadcast_shapes" not in str(e):
@@ -205,10 +241,11 @@ def _trim_edge_silence(audio, sample_rate):
 
     if audio.size == 0:
         return audio
-    threshold = np.abs(audio).max() * TRIM_THRESHOLD_RATIO
+    abs_audio = np.abs(audio)
+    threshold = abs_audio.max() * TRIM_THRESHOLD_RATIO
     if threshold <= 0:
         return audio
-    voiced = np.flatnonzero(np.abs(audio) > threshold)
+    voiced = np.flatnonzero(abs_audio > threshold)
     if voiced.size == 0:
         return audio
     pad = int(TRIM_PAD_SECONDS * sample_rate)
@@ -248,8 +285,6 @@ def generate_audio(text, voice, speed, lang_code, cancel_check=None):
         return out_path
 
     except Exception:
-        import shutil
-
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
 
@@ -259,7 +294,6 @@ def generate_audio(text, voice, speed, lang_code, cancel_check=None):
 
 def _client_gone(conn):
     """Non-blocking check: has the client closed the connection?"""
-    import select
     try:
         readable, _, _ = select.select([conn], [], [], 0)
         if readable:
@@ -291,13 +325,52 @@ def _read_request_line(conn):
     return data
 
 
-def _release_model_scratch():
-    """Release per-request scratch while the generation lock is still held."""
-    import gc
+def _clear_mlx_cache(mx):
+    clear = getattr(mx, "clear_cache", None)
+    if clear is not None:
+        clear()
+    elif hasattr(mx, "metal") and hasattr(mx.metal, "clear_cache"):
+        mx.metal.clear_cache()
+
+
+def _mlx_cache_bytes(mx):
+    getter = getattr(mx, "get_cache_memory", None)
+    if getter is not None:
+        try:
+            return int(getter())
+        except Exception:
+            return 0
+    if hasattr(mx, "metal") and hasattr(mx.metal, "get_cache_memory"):
+        try:
+            return int(mx.metal.get_cache_memory())
+        except Exception:
+            return 0
+    return 0
+
+
+def _release_model_scratch(force=False):
+    """Release per-request scratch while the generation lock is still held.
+
+    Avoids full gen-2 GC and Metal VM cache flushes on every sentence while
+    keeping Metal cache memory strictly bounded and always flushing on
+    cancellations/errors.
+    """
+    global generations_since_flush
     import mlx.core as mx
 
-    gc.collect()
-    mx.metal.clear_cache()
+    generations_since_flush += 1
+    should_flush = (
+        force
+        or generations_since_flush >= MLX_CACHE_FLUSH_EVERY
+        or _mlx_cache_bytes(mx) > MLX_CACHE_CAP_BYTES
+    )
+    if should_flush:
+        generations_since_flush = 0
+        gc.collect()
+        _clear_mlx_cache(mx)
+    else:
+        # Generation-0 sweep is sub-millisecond and reclaims request temporaries.
+        gc.collect(0)
 
 
 def handle_client(conn):
@@ -330,15 +403,13 @@ def handle_client(conn):
         # ── Validation: reject rather than let bad values reach the model,
         # and never log raw request fields (log-line forgery / content leaks).
         text = request.get("text", "")
-        voice = request.get("voice", "bf_lily")
+        voice = request.get("voice", "af_heart")
         speed_raw = request.get("speed", "1.0")
-        lang_code = request.get("lang_code", "b")
-        import math
-        import re
+        lang_code = request.get("lang_code", "a")
         if not isinstance(text, str) or not isinstance(voice, str) \
                 or not isinstance(lang_code, str) \
-                or not re.fullmatch(r"[a-z0-9_]{1,32}", voice) \
-                or not re.fullmatch(r"[a-z]", lang_code):
+                or not VOICE_RE.fullmatch(voice) \
+                or not LANG_RE.fullmatch(lang_code):
             log("request rejected: invalid fields")
             send({"status": "error", "message": "invalid request fields"})
             return
@@ -362,13 +433,17 @@ def handle_client(conn):
             # so stale work never reaches model.generate().
             if _client_gone(conn):
                 raise CancelledError("client disconnected while queued")
+            failed_or_cancelled = False
             try:
                 audio_file = generate_audio(
                     text, voice, speed, lang_code,
                     cancel_check=lambda: _client_gone(conn),
                 )
+            except BaseException:
+                failed_or_cancelled = True
+                raise
             finally:
-                _release_model_scratch()
+                _release_model_scratch(force=failed_or_cancelled)
 
         # Size before send: once the response is out, the client owns the
         # temp dir and may delete it before we could stat it.
@@ -519,9 +594,6 @@ def main():
         pass
 
     # Sweep temp dirs orphaned by interrupted generations.
-    import glob
-    import shutil
-
     for d in glob.glob(os.path.join(TMP_ROOT, "gen_*")):
         shutil.rmtree(d, ignore_errors=True)
 

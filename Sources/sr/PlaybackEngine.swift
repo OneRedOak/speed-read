@@ -1,9 +1,60 @@
+import Accelerate
+import AudioToolbox
 @preconcurrency import AVFoundation
 import Foundation
 import SRCore
 
-private final class ConverterInputState: @unchecked Sendable {
-    var fed = false
+/// In-memory byte source for `AudioFileOpenWithCallbacks` so MP3/WAV decoding
+/// never touches disk (no temp files in /tmp, even in no-cache mode).
+private final class MemoryAudioBox {
+    let data: Data
+    init(_ data: Data) { self.data = data }
+}
+
+private func memoryAudioReadProc(
+    _ clientData: UnsafeMutableRawPointer,
+    _ inPosition: Int64,
+    _ requestCount: UInt32,
+    _ buffer: UnsafeMutableRawPointer,
+    _ actualCount: UnsafeMutablePointer<UInt32>
+) -> OSStatus {
+    let box = Unmanaged<MemoryAudioBox>.fromOpaque(clientData).takeUnretainedValue()
+    let total = Int64(box.data.count)
+    if inPosition < 0 || inPosition >= total {
+        actualCount.pointee = 0
+        return noErr
+    }
+    let available = Int(min(Int64(requestCount), total - inPosition))
+    if available > 0 {
+        let start = Int(inPosition)
+        box.data.copyBytes(
+            to: buffer.assumingMemoryBound(to: UInt8.self),
+            from: start..<(start + available))
+    }
+    actualCount.pointee = UInt32(available)
+    return noErr
+}
+
+private func memoryAudioGetSizeProc(_ clientData: UnsafeMutableRawPointer) -> Int64 {
+    let box = Unmanaged<MemoryAudioBox>.fromOpaque(clientData).takeUnretainedValue()
+    return Int64(box.data.count)
+}
+
+/// Maps each scheduled player buffer's rendered sample span back to its exact
+/// content frame span, eliminating cumulative WSOLA length drift across long
+/// reads at any playback rate.
+struct ScheduledSpan {
+    let contentStart: AVAudioFramePosition
+    let contentLength: AVAudioFramePosition
+    let renderedStart: AVAudioFramePosition
+    let renderedLength: AVAudioFramePosition
+
+    func contentFrame(forRenderedSample sample: AVAudioFramePosition) -> AVAudioFramePosition {
+        guard renderedLength > 0 else { return contentStart }
+        let clampedOffset = min(max(sample - renderedStart, 0), renderedLength)
+        let fraction = Double(clampedOffset) / Double(renderedLength)
+        return contentStart + AVAudioFramePosition((fraction * Double(contentLength)).rounded())
+    }
 }
 
 /// Ordered cursor for a bounded seek/rate-change rerender. Keeping the cursor
@@ -37,8 +88,8 @@ struct RerenderWindowCursor {
     }
 }
 
-/// Timeline audio player with time-domain speed control and seeking
-/// (F-7, F-8).
+/// Timeline audio player with time-domain speed control, in-memory decoding,
+/// frame-accurate progress tracking, and seeking (F-7, F-8).
 ///
 /// Speed is applied by stretching PCM with WSOLA (see TimeStretch) at
 /// schedule time, not by a realtime phase-vocoder node — phase vocoders
@@ -47,14 +98,14 @@ struct RerenderWindowCursor {
 /// player → mixer in one canonical format (44.1 kHz mono float).
 ///
 /// The content timeline (original 1.0× audio, inter-sentence silence baked
-/// in) is kept verbatim; what's scheduled on the player is the stretched
-/// rendering at the current rate. Rate changes and seeks re-render from
-/// the current content position — segment by segment, off the main thread,
-/// so the first re-rendered chunk is audible in tens of milliseconds.
+/// in) is kept verbatim as compressed bytes; what's scheduled on the player
+/// is the stretched rendering at the current rate. Rate changes and seeks
+/// re-render from the current content position — segment by segment, off the
+/// main thread, with 5 ms raised-cosine de-click ramps.
 ///
-/// Positions are tracked in content frames: the player consumes stretched
-/// frames, so content position = baseFrame + playedFrames × renderRate.
-/// ±5 s seeks therefore mean 5 content-seconds at any rate.
+/// Positions are mapped through exact per-buffer `ScheduledSpan` intervals,
+/// so sentence progress, seeks, and pauses stay frame-accurate across
+/// hundreds of sentences at any speed with zero cumulative WSOLA drift.
 @MainActor
 final class PlaybackEngine: ObservableObject {
     enum State: Equatable {
@@ -68,11 +119,13 @@ final class PlaybackEngine: ObservableObject {
     @Published private(set) var totalSentences = 0
     @Published private(set) var currentSeconds: Double = 0
     @Published private(set) var availableSeconds: Double = 0
+    @Published private(set) var decodedSentences = 0
+    @Published private(set) var isBuffering = false
 
     var rate: Double {
         didSet {
             guard abs(rate - oldValue) > 0.001 else { return }
-            scheduleRateChange()
+            scheduleRateChange(immediate: false)
         }
     }
     var sentencePauseMS: Int
@@ -80,6 +133,12 @@ final class PlaybackEngine: ObservableObject {
     var onError: ((String) -> Void)?
 
     nonisolated static let sampleRate: Double = 44_100
+    /// Conservative edge-silence cap on decoded cloud/local audio so trailing
+    /// encoder dead air doesn't stack on top of `sentencePauseMS`.
+    private nonisolated static let maxLeadingSilenceSeconds: Double = 0.035
+    private nonisolated static let maxTrailingSilenceSeconds: Double = 0.060
+    private nonisolated static let microFadeFrames: Int = 220  // ~5 ms @ 44.1 kHz
+
     private let format = AVAudioFormat(
         standardFormatWithSampleRate: PlaybackEngine.sampleRate, channels: 1)!
 
@@ -89,6 +148,7 @@ final class PlaybackEngine: ObservableObject {
     private struct Segment {
         let encodedAudio: Data
         let pauseFrames: AVAudioFrameCount
+        let frameLength: AVAudioFramePosition
     }
 
     // Content timeline metadata + compressed source audio. PCM is decoded on
@@ -107,22 +167,31 @@ final class PlaybackEngine: ObservableObject {
 
     // Playback run state.
     private var renderRate: Double = 1.0                // rate of scheduled audio
-    private var baseFrame: AVAudioFramePosition = 0     // content frame at run start
     private var pausedAtFrame: AVAudioFramePosition = 0
+    private var scheduledSpans: [ScheduledSpan] = []
+    private var renderedFramesScheduled: AVAudioFramePosition = 0
     private var outstandingBuffers = 0
     private var generation = 0
     private var sessionGeneration = 0
     private var uiTimer: Timer?
     private var engineStarted = false
     private var rateChangeWork: DispatchWorkItem?
-    private var starvationPaused = false
+    private var configChangeWork: DispatchWorkItem?
+    private var engineRetryWork: DispatchWorkItem?
+    private var starvationPaused = false {
+        didSet { updateBufferingState() }
+    }
 
-    /// Serial chain so stretch+schedule ops run in timeline order even
-    /// though the stretching happens off the main thread.
+    /// Serial chains so decode and stretch+schedule ops run in timeline order
+    /// off the main thread. Tracked in arrays so `stop()` / `rescheduleContent()`
+    /// actually cancel queued tasks instead of leaving them running.
     private var chain: Task<Void, Never> = Task {}
+    private var renderTasks: [Task<Void, Never>] = []
     private var decodeChain: Task<Void, Never> = Task {}
+    private var decodeTasks: [Task<Void, Never>] = []
 
-    private var configObserver: NSObjectProtocol?
+    /// Only written in `init` and removed in `deinit` once no references remain.
+    nonisolated(unsafe) private var configObserver: NSObjectProtocol?
 
     init(rate: Double = 1.0, sentencePauseMS: Int = 400) {
         self.rate = rate
@@ -133,16 +202,15 @@ final class PlaybackEngine: ObservableObject {
         engine.connect(player, to: engine.mainMixerNode, format: format)
 
         // Output configuration changes (AirPods profile/sample-rate switch,
-        // device change) stop the engine and drop scheduled audio. Without
-        // this handler playback "skips": silence until the next segment
-        // schedule restarts the engine, losing everything queued in between.
-        // Recover by re-rendering from the last known position.
+        // device change) stop the engine and drop scheduled audio. Debounce
+        // rapid notifications during Bluetooth handoff, then re-render from
+        // the last known content frame.
         configObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: engine, queue: nil
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.handleConfigurationChange()
+                self?.scheduleConfigurationRecovery()
             }
         }
     }
@@ -153,15 +221,33 @@ final class PlaybackEngine: ObservableObject {
         }
     }
 
-    private func handleConfigurationChange() {
+    private func scheduleConfigurationRecovery() {
         guard isActive else { return }
-        SRLog.event("playback.config_change", [:])
-        // The engine is stopped; playerTime is gone. pausedAtFrame tracks the
-        // last known position (updated 4×/s while playing), so resume there.
-        rescheduleContent(from: pausedAtFrame)
+        configChangeWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            MainActor.assumeIsolated {
+                guard self.isActive else { return }
+                SRLog.event("playback.config_change", [:])
+                self.engineStarted = self.engine.isRunning
+                self.rescheduleContent(from: self.pausedAtFrame)
+            }
+        }
+        configChangeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
     }
 
     var isActive: Bool { state != .idle }
+
+    /// Update speed without the slider drag debounce (used by one-click preset chips).
+    func setRate(_ newRate: Double, immediate: Bool) {
+        let clamped = min(max(newRate, 0.5), 3.0)
+        guard abs(clamped - rate) > 0.001 else { return }
+        rate = clamped
+        if immediate {
+            scheduleRateChange(immediate: true)
+        }
+    }
 
     // MARK: - Session
 
@@ -171,6 +257,7 @@ final class PlaybackEngine: ObservableObject {
         totalSentences = total
         renderRate = rate
         state = .playing
+        updateBufferingState()
         startUITimer()
     }
 
@@ -193,13 +280,19 @@ final class PlaybackEngine: ObservableObject {
         let sessionGen = sessionGeneration
         let previous = decodeChain
         pendingDecodes += 1
-        decodeChain = Task { [weak self] in
+        let task = Task { [weak self] in
             await previous.value
             guard let self, !Task.isCancelled else { return }
             guard await MainActor.run(body: { self.sessionGeneration == sessionGen }) else { return }
-            let block = await Task.detached(priority: .userInitiated) {
+            let worker = Task.detached(priority: .userInitiated) {
                 Self.decodeBlock(data, pauseFrames: pauseFrames)
-            }.value
+            }
+            let block = await withTaskCancellationHandler {
+                await worker.value
+            } onCancel: {
+                worker.cancel()
+            }
+            guard !Task.isCancelled else { return }
             await MainActor.run {
                 self.finishDecode(
                     sentence: index,
@@ -209,6 +302,8 @@ final class PlaybackEngine: ObservableObject {
                     sessionGeneration: sessionGen)
             }
         }
+        decodeChain = task
+        decodeTasks.append(task)
     }
 
     private func finishDecode(
@@ -226,20 +321,28 @@ final class PlaybackEngine: ObservableObject {
             return
         }
 
-        segmentStartFrames.append(totalFrames)
+        let startFrame = totalFrames
+        let length = AVAudioFramePosition(block.frameLength)
+        segmentStartFrames.append(startFrame)
         segments.append(Segment(
             encodedAudio: data,
-            pauseFrames: pauseFrames))
-        totalFrames += AVAudioFramePosition(block.frameLength)
+            pauseFrames: pauseFrames,
+            frameLength: length))
+        totalFrames += length
         availableSeconds = Double(totalFrames) / Self.sampleRate
         appendedCount += 1
+        decodedSentences = appendedCount
 
         if rerenderCursor.isActive {
             // A seek/rate rerender owns scheduling order until the session
             // ends. Its cursor will consume this newly appended segment.
             pumpRerenderWindow()
         } else {
-            enqueueStretchAndSchedule(block, isFinal: index == totalSentences - 1)
+            enqueueStretchAndSchedule(
+                block,
+                contentStart: startFrame,
+                contentLength: length,
+                isFinal: index == totalSentences - 1)
         }
     }
 
@@ -251,13 +354,14 @@ final class PlaybackEngine: ObservableObject {
         player.pause()
         starvationPaused = false
         state = .paused
+        updateBufferingState()
         SRLog.event("playback.pause", [:])
     }
 
     func resume() {
         guard state == .paused else { return }
         state = .playing
-        guard ensureEngineRunning() else { return }
+        guard ensureEngineRunning(allowRetry: true) else { return }
         if outstandingBuffers > 0 {
             player.play()
             starvationPaused = false
@@ -265,6 +369,7 @@ final class PlaybackEngine: ObservableObject {
             // Stay clock-paused until the next decoded/rendered buffer lands.
             starvationPaused = true
         }
+        updateBufferingState()
         SRLog.event("playback.resume", [:])
         // The last buffer's completion may have fired while paused (its
         // checkFinished no-ops on state != .playing) — re-check, or a
@@ -280,16 +385,32 @@ final class PlaybackEngine: ObservableObject {
         }
     }
 
+    private func cancelRenderTasks() {
+        for task in renderTasks { task.cancel() }
+        renderTasks.removeAll()
+        chain = Task {}
+    }
+
+    private func cancelDecodeTasks() {
+        for task in decodeTasks { task.cancel() }
+        decodeTasks.removeAll()
+        decodeChain = Task {}
+    }
+
     func stop() {
         generation += 1
         sessionGeneration += 1
-        chain = Task {}
-        decodeChain = Task {}
+        cancelRenderTasks()
+        cancelDecodeTasks()
         rateChangeWork?.cancel()
         rateChangeWork = nil
+        configChangeWork?.cancel()
+        configChangeWork = nil
+        engineRetryWork?.cancel()
+        engineRetryWork = nil
         uiTimer?.invalidate()
         uiTimer = nil
-        if engineStarted {
+        if engineStarted || engine.isRunning {
             player.stop()
             // Release the output audio unit / device claim: a menu-bar app
             // idles most of the time and shouldn't stay an active audio
@@ -300,16 +421,19 @@ final class PlaybackEngine: ObservableObject {
         segments.removeAll()
         segmentStartFrames.removeAll()
         pendingFeeds.removeAll()
+        scheduledSpans.removeAll()
+        renderedFramesScheduled = 0
         totalFrames = 0
         receivedCount = 0
         appendedCount = 0
+        decodedSentences = 0
         pendingDecodes = 0
         pendingRenders = 0
         rerenderCursor.reset()
-        baseFrame = 0
         pausedAtFrame = 0
         outstandingBuffers = 0
         starvationPaused = false
+        isBuffering = false
         currentSentence = 0
         totalSentences = 0
         currentSeconds = 0
@@ -325,6 +449,20 @@ final class PlaybackEngine: ObservableObject {
         SRLog.event("playback.seek", ["delta_s": String(Int(deltaSeconds))])
     }
 
+    /// Seek directly to an absolute content timestamp within decoded audio.
+    func seek(toSeconds targetSeconds: Double) {
+        guard isActive, totalFrames > 0 else { return }
+        let target = AVAudioFramePosition((targetSeconds * Self.sampleRate).rounded())
+        rescheduleContent(from: target)
+    }
+
+    /// Jump forward or backward by whole sentences within decoded audio.
+    func skipSentence(by delta: Int) {
+        guard isActive, !segmentStartFrames.isEmpty else { return }
+        let targetIndex = min(max(0, currentSentence + delta), segmentStartFrames.count - 1)
+        rescheduleContent(from: segmentStartFrames[targetIndex])
+    }
+
     /// Restart from the top.
     func restart() {
         guard isActive else { return }
@@ -333,13 +471,18 @@ final class PlaybackEngine: ObservableObject {
 
     // MARK: - Rendering
 
-    /// Debounced so slider drags don't trigger a re-render per tick.
-    private func scheduleRateChange() {
+    /// Debounced for slider drags; immediate for one-click speed presets.
+    private func scheduleRateChange(immediate: Bool) {
         guard isActive else {
             renderRate = rate
             return
         }
         rateChangeWork?.cancel()
+        rateChangeWork = nil
+        if immediate {
+            rescheduleContent(from: currentFrame)
+            return
+        }
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             MainActor.assumeIsolated {
@@ -348,7 +491,7 @@ final class PlaybackEngine: ObservableObject {
             }
         }
         rateChangeWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
     }
 
     /// Stop the player and re-render + re-schedule everything from `target`
@@ -365,13 +508,16 @@ final class PlaybackEngine: ObservableObject {
         let clamped = min(max(0, target), totalFrames - 1)
 
         generation += 1          // invalidate stale completions and chain ops
-        chain = Task {}
+        cancelRenderTasks()
+        engineRetryWork?.cancel()
+        engineRetryWork = nil
         pendingRenders = 0
         player.stop()            // clears queue; playerTime resets
+        scheduledSpans.removeAll()
+        renderedFramesScheduled = 0
         outstandingBuffers = 0
         starvationPaused = state == .playing
         renderRate = rate
-        baseFrame = clamped
         pausedAtFrame = clamped
 
         guard let startSegment = segmentIndex(containing: clamped) else { return }
@@ -388,71 +534,145 @@ final class PlaybackEngine: ObservableObject {
     private func pumpRerenderWindow() {
         while pendingRenders + outstandingBuffers < renderWindowSize,
               let next = rerenderCursor.takeNext(existingSegmentCount: segments.count) {
-            enqueueSegmentRender(segments[next.index], offset: next.offset,
-                                 isFinal: next.index == totalSentences - 1)
+            let segment = segments[next.index]
+            let contentStart = segmentStartFrames[next.index] + AVAudioFramePosition(next.offset)
+            let contentLength = max(segment.frameLength - AVAudioFramePosition(next.offset), 1)
+            enqueueSegmentRender(
+                segment,
+                offset: next.offset,
+                contentStart: contentStart,
+                contentLength: contentLength,
+                isFinal: next.index == totalSentences - 1)
         }
     }
 
     /// Re-decode a compressed segment for seek/rate-change rendering. This is
     /// intentionally in the serial render chain so timeline order is stable.
-    private func enqueueSegmentRender(_ segment: Segment, offset: AVAudioFrameCount, isFinal: Bool) {
+    private func enqueueSegmentRender(
+        _ segment: Segment,
+        offset: AVAudioFrameCount,
+        contentStart: AVAudioFramePosition,
+        contentLength: AVAudioFramePosition,
+        isFinal: Bool
+    ) {
         let gen = generation
         let rate = renderRate
         let previous = chain
         pendingRenders += 1
-        chain = Task { [weak self] in
+        let task = Task { [weak self] in
             await previous.value
             guard let self, !Task.isCancelled else { return }
             guard await MainActor.run(body: { self.generation == gen }) else { return }
-            let rendered: AVAudioPCMBuffer? = await Task.detached(priority: .userInitiated) {
+            let worker = Task.detached(priority: .userInitiated) {
                 () -> AVAudioPCMBuffer? in
+                guard !Task.isCancelled else { return nil }
                 guard let block = Self.decodeBlock(
                     segment.encodedAudio, pauseFrames: segment.pauseFrames),
                       let partial = Self.slice(block, from: offset) else { return nil }
+                guard !Task.isCancelled else { return nil }
                 return TimeStretch.stretch(partial, rate: rate)
-            }.value
+            }
+            let rendered = await withTaskCancellationHandler {
+                await worker.value
+            } onCancel: {
+                worker.cancel()
+            }
+            guard !Task.isCancelled else { return }
             await MainActor.run {
-                self.finishRender(rendered, generation: gen, isFinal: isFinal)
+                self.finishRender(
+                    rendered,
+                    contentStart: contentStart,
+                    contentLength: contentLength,
+                    generation: gen,
+                    isFinal: isFinal)
             }
         }
+        chain = task
+        renderTasks.append(task)
     }
 
     /// Append a stretch+schedule op to the serial chain. Stretching runs
     /// off the main actor; scheduling hops back and is generation-guarded.
-    private func enqueueStretchAndSchedule(_ buffer: AVAudioPCMBuffer, isFinal: Bool) {
+    private func enqueueStretchAndSchedule(
+        _ buffer: AVAudioPCMBuffer,
+        contentStart: AVAudioFramePosition,
+        contentLength: AVAudioFramePosition,
+        isFinal: Bool
+    ) {
         let gen = generation
         let rate = renderRate
         let previous = chain
         pendingRenders += 1
-        chain = Task { [weak self] in
+        let task = Task { [weak self] in
             await previous.value
             guard let self, !Task.isCancelled else { return }
             // Bail before stretching, not just before scheduling: stop() and
-            // reschedules orphan this chain, and WSOLA on a long article is
-            // real CPU spent on audio the generation guard would discard.
+            // reschedules cancel this chain so WSOLA never wastes CPU on stale audio.
             guard await MainActor.run(body: { self.generation == gen }) else { return }
-            let stretched = await Task.detached(priority: .userInitiated) {
+            let worker = Task.detached(priority: .userInitiated) {
                 TimeStretch.stretch(buffer, rate: rate)
-            }.value
+            }
+            let stretched = await withTaskCancellationHandler {
+                await worker.value
+            } onCancel: {
+                worker.cancel()
+            }
+            guard !Task.isCancelled else { return }
             await MainActor.run {
-                self.finishRender(stretched, generation: gen, isFinal: isFinal)
+                self.finishRender(
+                    stretched,
+                    contentStart: contentStart,
+                    contentLength: contentLength,
+                    generation: gen,
+                    isFinal: isFinal)
             }
         }
+        chain = task
+        renderTasks.append(task)
     }
 
-    private func finishRender(_ buffer: AVAudioPCMBuffer?, generation gen: Int, isFinal: Bool) {
+    private func finishRender(
+        _ buffer: AVAudioPCMBuffer?,
+        contentStart: AVAudioFramePosition,
+        contentLength: AVAudioFramePosition,
+        generation gen: Int,
+        isFinal: Bool
+    ) {
         guard gen == generation, isActive else { return }
         pendingRenders = max(pendingRenders - 1, 0)
         guard let buffer else {
             failPlayback("Audio could not be decoded while seeking.")
             return
         }
-        scheduleStretched(buffer, generation: gen, isFinal: isFinal)
+        scheduleStretched(
+            buffer,
+            contentStart: contentStart,
+            contentLength: contentLength,
+            generation: gen,
+            isFinal: isFinal)
     }
 
-    private func scheduleStretched(_ buffer: AVAudioPCMBuffer, generation gen: Int, isFinal: Bool) {
+    private func scheduleStretched(
+        _ buffer: AVAudioPCMBuffer,
+        contentStart: AVAudioFramePosition,
+        contentLength: AVAudioFramePosition,
+        generation gen: Int,
+        isFinal: Bool
+    ) {
         guard gen == generation, isActive else { return }
-        guard ensureEngineRunning() else { return }
+        // Only claim and start the audio device while actually playing —
+        // seeking, rate changes, or late decodes while paused must not wake
+        // the audio hardware until the user presses Resume.
+        if state == .playing {
+            guard ensureEngineRunning(allowRetry: true) else { return }
+        }
+        let span = ScheduledSpan(
+            contentStart: contentStart,
+            contentLength: contentLength,
+            renderedStart: renderedFramesScheduled,
+            renderedLength: AVAudioFramePosition(buffer.frameLength))
+        scheduledSpans.append(span)
+        renderedFramesScheduled += span.renderedLength
         outstandingBuffers += 1
         // Refill/freeze the content clock as soon as non-final audio renders.
         // Only the final buffer waits for device latency; its completion may
@@ -481,19 +701,39 @@ final class PlaybackEngine: ObservableObject {
             player.play()
             starvationPaused = false
         }
+        updateBufferingState()
     }
 
     // MARK: - Position
 
     private var currentFrame: AVAudioFramePosition {
         guard state == .playing,
+              !starvationPaused,
+              player.isPlaying,
               let nodeTime = player.lastRenderTime,
-              let playerTime = player.playerTime(forNodeTime: nodeTime) else {
+              let playerTime = player.playerTime(forNodeTime: nodeTime),
+              !scheduledSpans.isEmpty else {
             return pausedAtFrame
         }
-        let contentAdvance = AVAudioFramePosition(
-            Double(playerTime.sampleTime) * renderRate)
-        return min(baseFrame + contentAdvance, totalFrames)
+        return Self.contentFrame(forRenderedSample: playerTime.sampleTime, in: scheduledSpans, totalFrames: totalFrames)
+    }
+
+    nonisolated static func contentFrame(
+        forRenderedSample sampleTime: AVAudioFramePosition,
+        in spans: [ScheduledSpan],
+        totalFrames: AVAudioFramePosition
+    ) -> AVAudioFramePosition {
+        guard !spans.isEmpty else { return 0 }
+        let sample = max(sampleTime, 0)
+        // Binary search for the last span with renderedStart <= sample.
+        var low = 0
+        var high = spans.count - 1
+        while low < high {
+            let mid = (low + high + 1) / 2
+            if spans[mid].renderedStart <= sample { low = mid } else { high = mid - 1 }
+        }
+        let mapped = spans[low].contentFrame(forRenderedSample: sample)
+        return min(max(mapped, 0), totalFrames)
     }
 
     private func segmentIndex(containing frame: AVAudioFramePosition) -> Int? {
@@ -507,9 +747,13 @@ final class PlaybackEngine: ObservableObject {
         return low
     }
 
+    private func updateBufferingState() {
+        isBuffering = state == .playing && (totalFrames == 0 || starvationPaused)
+    }
+
     private func startUITimer() {
         uiTimer?.invalidate()
-        uiTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+        uiTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.updateUIPosition()
             }
@@ -524,9 +768,10 @@ final class PlaybackEngine: ObservableObject {
         }
         // Keep the fallback position fresh: it's the resume point after an
         // engine configuration change, when playerTime is unavailable.
-        if state == .playing {
+        if state == .playing, !starvationPaused {
             pausedAtFrame = frame
         }
+        updateBufferingState()
     }
 
     private func checkFinished() {
@@ -546,13 +791,36 @@ final class PlaybackEngine: ObservableObject {
     // MARK: - Engine / decode
 
     @discardableResult
-    private func ensureEngineRunning() -> Bool {
-        guard !engine.isRunning else { return true }
+    private func ensureEngineRunning(allowRetry: Bool) -> Bool {
+        guard !engine.isRunning else {
+            engineStarted = true
+            return true
+        }
         do {
             try engine.start()
             engineStarted = true
             return true
         } catch {
+            if allowRetry {
+                // Bluetooth/AirPods handoffs can momentarily reject engine.start()
+                // for ~100–250 ms. Retry once before failing the session.
+                SRLog.event("playback.engine_start_retry", [:])
+                let gen = generation
+                engineRetryWork?.cancel()
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self else { return }
+                    MainActor.assumeIsolated {
+                        guard self.isActive, self.generation == gen, self.state == .playing else { return }
+                        if self.ensureEngineRunning(allowRetry: false), self.outstandingBuffers > 0 {
+                            self.player.play()
+                            self.starvationPaused = false
+                        }
+                    }
+                }
+                engineRetryWork = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+                return false
+            }
             SRLog.error("playback.engine_start", ["error": String(describing: error)])
             failPlayback("The audio output device could not be started.")
             return false
@@ -565,50 +833,155 @@ final class PlaybackEngine: ObservableObject {
         callback?(message)
     }
 
-    /// Decode MP3/WAV Data → canonical 44.1 kHz mono float buffer.
-    private nonisolated static func decode(_ data: Data) -> AVAudioPCMBuffer? {
-        // AVAudioFile needs a URL; write to a private temp file with a
-        // random name (never content-derived), delete immediately after.
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("sr-\(UUID().uuidString).audio")
-        defer { try? FileManager.default.removeItem(at: url) }
-        do {
-            try data.write(to: url, options: .completeFileProtection)
-            let file = try AVAudioFile(forReading: url)
-            guard let raw = AVAudioPCMBuffer(
-                pcmFormat: file.processingFormat,
-                frameCapacity: AVAudioFrameCount(file.length)) else { return nil }
-            try file.read(into: raw)
-            guard let target = AVAudioFormat(
-                standardFormatWithSampleRate: sampleRate, channels: 1) else { return nil }
-            return convert(raw, to: target)
-        } catch {
-            SRLog.error("playback.decode", ["error": String(describing: type(of: error))])
+    /// Decode MP3/WAV Data completely in memory (zero temp files on disk) →
+    /// canonical 44.1 kHz mono Float32 buffer, with conservative edge-silence
+    /// capping so cloud/local silence pads don't stack on `sentencePauseMS`.
+    nonisolated static func decode(_ data: Data) -> AVAudioPCMBuffer? {
+        guard !data.isEmpty else { return nil }
+
+        let hint: AudioFileTypeID
+        if AudioPayloadValidator.isWAV(data) {
+            hint = kAudioFileWAVEType
+        } else if AudioPayloadValidator.isMP3(data) {
+            hint = kAudioFileMP3Type
+        } else {
+            hint = 0
+        }
+
+        let box = MemoryAudioBox(data)
+        let unmanaged = Unmanaged.passUnretained(box)
+        var audioFileID: AudioFileID?
+        let openStatus = AudioFileOpenWithCallbacks(
+            unmanaged.toOpaque(),
+            memoryAudioReadProc,
+            nil,
+            memoryAudioGetSizeProc,
+            nil,
+            hint,
+            &audioFileID
+        )
+        guard openStatus == noErr, let audioFile = audioFileID else {
+            SRLog.error("playback.decode", ["stage": "open", "status": String(openStatus)])
             return nil
         }
-    }
+        defer { AudioFileClose(audioFile) }
 
-    private nonisolated static func convert(
-        _ buffer: AVAudioPCMBuffer,
-        to target: AVAudioFormat
-    ) -> AVAudioPCMBuffer? {
-        if buffer.format == target { return buffer }
-        guard let converter = AVAudioConverter(from: buffer.format, to: target) else { return nil }
-        let ratio = target.sampleRate / buffer.format.sampleRate
-        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024
-        guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return nil }
-        let inputState = ConverterInputState()
-        var error: NSError?
-        converter.convert(to: out, error: &error) { _, status in
-            if inputState.fed {
-                status.pointee = .endOfStream
+        var extFileID: ExtAudioFileRef?
+        let wrapStatus = ExtAudioFileWrapAudioFileID(audioFile, false, &extFileID)
+        guard wrapStatus == noErr, let extFile = extFileID else {
+            SRLog.error("playback.decode", ["stage": "wrap", "status": String(wrapStatus)])
+            return nil
+        }
+        defer { ExtAudioFileDispose(extFile) }
+
+        var clientASBD = AudioStreamBasicDescription(
+            mSampleRate: sampleRate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 4,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 4,
+            mChannelsPerFrame: 1,
+            mBitsPerChannel: 32,
+            mReserved: 0
+        )
+        let propStatus = ExtAudioFileSetProperty(
+            extFile,
+            kExtAudioFileProperty_ClientDataFormat,
+            UInt32(MemoryLayout<AudioStreamBasicDescription>.size),
+            &clientASBD
+        )
+        guard propStatus == noErr else {
+            SRLog.error("playback.decode", ["stage": "format", "status": String(propStatus)])
+            return nil
+        }
+
+        let chunkFrames: UInt32 = 16_384
+        var scratch = [Float](repeating: 0, count: Int(chunkFrames))
+        var samples: [Float] = []
+        samples.reserveCapacity(Int(sampleRate * 4))
+
+        while true {
+            var frameCount = chunkFrames
+            let readStatus: OSStatus = scratch.withUnsafeMutableBytes { raw in
+                var bufferList = AudioBufferList(
+                    mNumberBuffers: 1,
+                    mBuffers: AudioBuffer(
+                        mNumberChannels: 1,
+                        mDataByteSize: UInt32(raw.count),
+                        mData: raw.baseAddress
+                    )
+                )
+                return ExtAudioFileRead(extFile, &frameCount, &bufferList)
+            }
+            guard readStatus == noErr else {
+                SRLog.error("playback.decode", ["stage": "read", "status": String(readStatus)])
                 return nil
             }
-            inputState.fed = true
-            status.pointee = .haveData
-            return buffer
+            if frameCount == 0 { break }
+            samples.append(contentsOf: scratch[0..<Int(frameCount)])
         }
-        return error == nil ? out : nil
+
+        guard !samples.isEmpty else { return nil }
+        let trimmed = trimExcessiveEdgeSilence(samples)
+        guard let target = AVAudioFormat(
+            standardFormatWithSampleRate: sampleRate, channels: 1),
+              let out = AVAudioPCMBuffer(
+                pcmFormat: target,
+                frameCapacity: AVAudioFrameCount(trimmed.count)),
+              let outPtr = out.floatChannelData?[0] else {
+            return nil
+        }
+        trimmed.withUnsafeBufferPointer { src in
+            guard let base = src.baseAddress else { return }
+            outPtr.update(from: base, count: trimmed.count)
+        }
+        out.frameLength = AVAudioFrameCount(trimmed.count)
+        return out
+    }
+
+    /// Conservatively cap excessive leading/trailing dead air while preserving
+    /// natural breaths/pads and applying a 5 ms micro-fade at any trimmed edge.
+    /// All-silent buffers pass through untouched.
+    nonisolated static func trimExcessiveEdgeSilence(_ samples: [Float]) -> [Float] {
+        let count = samples.count
+        guard count > 0 else { return samples }
+        var peak: Float = 0
+        vDSP_maxmgv(samples, 1, &peak, vDSP_Length(count))
+        let threshold = max(peak * 0.004, 1e-4)
+        guard peak > threshold else { return samples }
+
+        var firstVoiced = 0
+        while firstVoiced < count && abs(samples[firstVoiced]) <= threshold {
+            firstVoiced += 1
+        }
+        var lastVoiced = count - 1
+        while lastVoiced > firstVoiced && abs(samples[lastVoiced]) <= threshold {
+            lastVoiced -= 1
+        }
+
+        let leadPad = Int(maxLeadingSilenceSeconds * sampleRate)
+        let trailPad = Int(maxTrailingSilenceSeconds * sampleRate)
+        let start = max(firstVoiced - leadPad, 0)
+        let end = min(lastVoiced + 1 + trailPad, count)
+        if start == 0 && end == count { return samples }
+
+        var result = Array(samples[start..<end])
+        let fade = min(microFadeFrames, result.count / 2)
+        if start > 0 && fade > 0 {
+            for i in 0..<fade {
+                let t = Float(0.5 * (1.0 - cos(Double.pi * Double(i) / Double(fade))))
+                result[i] *= t
+            }
+        }
+        if end < count && fade > 0 {
+            let tailStart = result.count - fade
+            for i in 0..<fade {
+                let t = Float(0.5 * (1.0 + cos(Double.pi * Double(i) / Double(fade))))
+                result[tailStart + i] *= t
+            }
+        }
+        return result
     }
 
     private nonisolated static func silence(
@@ -644,7 +1017,9 @@ final class PlaybackEngine: ObservableObject {
         return out
     }
 
-    private nonisolated static func slice(
+    /// Slice a segment for mid-sentence seek/rate-change, applying a 5 ms
+    /// raised-cosine fade-in when `offset > 0` to eliminate waveform clicks.
+    nonisolated static func slice(
         _ buffer: AVAudioPCMBuffer,
         from offset: AVAudioFrameCount
     ) -> AVAudioPCMBuffer? {
@@ -653,7 +1028,15 @@ final class PlaybackEngine: ObservableObject {
         guard let out = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: length),
               let outData = out.floatChannelData,
               let inData = buffer.floatChannelData else { return nil }
-        outData[0].update(from: inData[0] + Int(offset), count: Int(length))
+        let dest = outData[0]
+        dest.update(from: inData[0] + Int(offset), count: Int(length))
+        if offset > 0 {
+            let fade = min(microFadeFrames, Int(length))
+            for i in 0..<fade {
+                let t = Float(0.5 * (1.0 - cos(Double.pi * Double(i) / Double(fade))))
+                dest[i] *= t
+            }
+        }
         out.frameLength = length
         return out
     }

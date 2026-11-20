@@ -77,8 +77,36 @@ public enum TTSError: Error, Sendable {
 public protocol TTSProvider: Sendable {
     var id: String { get }
     var isLocal: Bool { get }
+    /// Estimated credits per input character (0.5 for Turbo/Flash cloud models,
+    /// 1.0 for flagship cloud models, 0 for local models).
+    var creditMultiplier: Double { get }
+    /// Cache-relevant output format tag when non-default; nil keeps default keys.
+    var cacheOutputFormat: String? { get }
     func voices() async throws -> [Voice]
     func synthesize(text: String, voiceID: String, settings: VoiceSettings) async throws -> SynthesisResult
+    /// Optional context-aware synthesis: `previousText` passes trailing text
+    /// from the already-approved preceding chunk for prosodic continuity (free
+    /// on ElevenLabs — 0 extra credits, never sends future unsent text).
+    func synthesize(
+        text: String,
+        voiceID: String,
+        settings: VoiceSettings,
+        previousText: String?
+    ) async throws -> SynthesisResult
+}
+
+public extension TTSProvider {
+    var creditMultiplier: Double { isLocal ? 0.0 : 1.0 }
+    var cacheOutputFormat: String? { nil }
+
+    func synthesize(
+        text: String,
+        voiceID: String,
+        settings: VoiceSettings,
+        previousText: String?
+    ) async throws -> SynthesisResult {
+        try await synthesize(text: text, voiceID: voiceID, settings: settings)
+    }
 }
 
 // Error payloads can contain provider-echoed text, URLs, or history IDs.

@@ -2,11 +2,13 @@ import Foundation
 import SRCore
 
 /// Bounded-concurrency chunk synthesis (F-5) with cache-first lookup (C-4),
-/// exact-cost + history-ID reporting, and cloud→local fallback (F-3 Auto).
+/// exact-cost + history-ID reporting, free prosody context (`previous_text`),
+/// and cloud→local fallback (F-3 Auto).
 ///
-/// At most `maxInFlight` chunks synthesize concurrently; results are
-/// delivered as they complete and the playback engine schedules in order.
-/// Chunk 0 is requested first so playback starts fast.
+/// Cloud routes run up to `maxInFlight` chunks concurrently for throughput.
+/// Local routes (Kokoro) serialize on a single GPU lock in the daemon, so
+/// running `concurrency = 1` guarantees chunk 0 always completes first with
+/// minimal Time-To-First-Audio instead of competing behind chunks 1–2.
 ///
 /// Fallback (ported from speak.sh): when the primary provider fails with a
 /// fallback-trigger error (429 / 5xx / network) and a fallback provider is
@@ -59,15 +61,33 @@ final class SynthesisPipeline: @unchecked Sendable {
         let flights = SynthesisSingleFlight()
         self.flights = flights
 
-        @Sendable func cacheKey(_ route: Route, _ chunk: Chunk) -> String {
-            AudioCache.key(text: chunk.text, provider: route.provider.id,
-                           voiceID: route.voiceID, modelID: route.modelID,
-                           settings: settings)
+        // Preceding sentence text per chunk for free ElevenLabs prosody
+        // continuity (`previous_text`). Never passes future unsent text, so
+        // pause/stop/budget boundaries stay airtight.
+        let previousTextByChunkID: [Int: String] = Dictionary(
+            uniqueKeysWithValues: chunks.indices.compactMap { idx -> (Int, String)? in
+                guard idx > 0 else { return nil }
+                guard let trimmed = ElevenLabsProvider.trimmedPreviousContext(chunks[idx - 1].text)
+                else { return nil }
+                return (chunks[idx].id, trimmed)
+            }
+        )
+
+        @Sendable func cacheKey(_ route: Route, _ chunk: Chunk, previousContext: String) -> String {
+            AudioCache.key(
+                text: chunk.text,
+                provider: route.provider.id,
+                voiceID: route.voiceID,
+                modelID: route.modelID,
+                settings: settings,
+                previousContext: previousContext,
+                outputFormat: route.provider.cacheOutputFormat)
         }
 
         @Sendable func synthesizeOn(_ route: Route, chunk: Chunk) async throws -> Data {
             try Task.checkCancellation()
-            let key = cacheKey(route, chunk)
+            let previousContext = route.provider.isLocal ? "" : (previousTextByChunkID[chunk.id] ?? "")
+            let key = cacheKey(route, chunk, previousContext: previousContext)
             if let cached = cache?.lookup(key) { return cached }
 
             return try await flights.value(for: key) {
@@ -80,7 +100,9 @@ final class SynthesisPipeline: @unchecked Sendable {
                 if route.provider.isLocal {
                     reservation = nil
                 } else {
-                    guard let claimed = budget.claim(chunk.text.count) else {
+                    let multiplier = max(route.provider.creditMultiplier, 0.0)
+                    let estimate = max(Int(ceil(Double(chunk.text.count) * multiplier)), 0)
+                    guard let claimed = budget.claim(estimate) else {
                         throw TTSError.budgetExceeded
                     }
                     reservation = claimed
@@ -90,7 +112,10 @@ final class SynthesisPipeline: @unchecked Sendable {
                 do {
                     try Task.checkCancellation()
                     result = try await route.provider.synthesize(
-                        text: chunk.text, voiceID: route.voiceID, settings: settings)
+                        text: chunk.text,
+                        voiceID: route.voiceID,
+                        settings: settings,
+                        previousText: previousContext.isEmpty ? nil : previousContext)
                 } catch let error as TTSError {
                     if case .invalidAudio(let historyID, let billedCharacters) = error {
                         if let reservation {
@@ -128,7 +153,7 @@ final class SynthesisPipeline: @unchecked Sendable {
             // A paused/slow listener must not pay to generate the whole article.
             if let shouldSynthesize {
                 while !(await shouldSynthesize(chunk.id)) {
-                    try await Task.sleep(for: .milliseconds(250))
+                    try await Task.sleep(for: .milliseconds(100))
                 }
             }
             try Task.checkCancellation()
@@ -150,6 +175,12 @@ final class SynthesisPipeline: @unchecked Sendable {
             guard !Task.isCancelled else { return }
             await callbacks.deliver(chunk.id, audio)
         }
+
+        // Local GPU inference is serialized by the daemon's generation_lock.
+        // Launching 3 concurrent requests lets chunks 1–2 beat chunk 0 to the
+        // lock, doubling or tripling Time-To-First-Audio. Strict serial order
+        // for local routes guarantees chunk 0 always finishes first.
+        let concurrency = primary.provider.isLocal ? 1 : Self.maxInFlight
 
         task = Task {
             await withTaskGroup(of: Void.self) { group in
@@ -188,7 +219,7 @@ final class SynthesisPipeline: @unchecked Sendable {
                     return true
                 }
 
-                for _ in 0..<Self.maxInFlight {
+                for _ in 0..<concurrency {
                     if !spawnNext() { break }
                 }
                 while active > 0 {

@@ -63,7 +63,7 @@ public struct KokoroProvider: TTSProvider {
 
     public func synthesize(text: String, voiceID: String, settings: VoiceSettings) async throws -> SynthesisResult {
         do {
-            try await runtime.supervisor.ensureRunning()
+            try await runtime.supervisor.ensureRunning(warmupVoice: voiceID)
         } catch let error as KokoroDaemonSupervisor.SupervisorError {
             if case .notInstalled = error {
                 throw TTSError.network(underlying: "kokoro: local TTS not installed")
