@@ -229,7 +229,9 @@ enum HeadlessCLI {
         let deleteHistory = settings.autoDeleteHistory
 
         let cloud = SynthesisPipeline.Route(
-            provider: ElevenLabsProvider(modelID: settings.modelID),
+            provider: ElevenLabsProvider(
+                modelID: settings.modelID,
+                audioQuality: settings.audioQuality),
             voiceID: settings.voiceID, modelID: settings.modelID)
         let local: SynthesisPipeline.Route? = KokoroRuntime.shared.isInstalled
             ? SynthesisPipeline.Route(provider: KokoroProvider(),

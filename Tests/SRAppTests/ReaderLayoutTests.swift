@@ -13,9 +13,13 @@ import Testing
         let suite = "sr-layout-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        let state = AppState(store: SettingsStore(defaults: defaults), startServices: false)
+        let state = AppState(
+            store: SettingsStore(defaults: defaults),
+            ledger: CostLedger(defaults: defaults),
+            startServices: false)
         state.kokoroInstalled = true
         state.kokoroNeedsUpdate = false
+        state.kokoroDaemonRunning = true
         state.localVoiceID = "af_heart"
         state.playbackRate = 1.25
         state.creditsRemaining = 22000
@@ -31,10 +35,16 @@ import Testing
         state.backendMode = .cloud
         state.availableVoices = [Voice(id: "layout-voice", name: "Chris — Charming, Down-to-Earth")]
         state.voiceID = "layout-voice"
+        state.activeBackend = .cloud
         state.playback.startSession(totalSentences: 27)
         state.playback.pause()
         defer { state.playback.stop() }
         try render(state, dark: true, url: directory.appendingPathComponent("paused-dark.png"))
+
+        state.lastError = "No ElevenLabs API key — add one in Settings."
+        state.errorAction = .openSettings
+        try render(state, dark: true, url: directory.appendingPathComponent("error-dark.png"))
+        state.dismissError()
     }
 
     private func render(_ state: AppState, dark: Bool, url: URL) throws {
