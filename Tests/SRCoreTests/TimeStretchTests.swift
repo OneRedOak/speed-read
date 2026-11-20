@@ -17,7 +17,7 @@ import Testing
         return buffer
     }
 
-    @Test(arguments: [1.5, 2.0, 3.0, 0.75])
+    @Test(arguments: [0.5, 0.75, 1.25, 1.5, 2.0, 2.5, 3.0])
     func stretchedLengthMatchesRate(rate: Double) {
         let input = sineBuffer(seconds: 2.0)
         let output = TimeStretch.stretch(input, rate: rate)
@@ -65,5 +65,35 @@ import Testing
             peak = max(peak, abs(data[i]))
         }
         #expect(peak == 0)
+    }
+
+    @Test func leadingSilencePreservesCadenceAndSpeechOnset() {
+        // 0.4 s silence + 1.0 s 220 Hz tone stretched at 2.0× should start
+        // speech near 0.2 s (~8,820 frames), not drifted early/late.
+        let sr = 44_100.0
+        let silenceFrames = Int(0.4 * sr)
+        let toneFrames = Int(1.0 * sr)
+        let total = silenceFrames + toneFrames
+        let format = AVAudioFormat(standardFormatWithSampleRate: sr, channels: 1)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(total))!
+        buffer.frameLength = AVAudioFrameCount(total)
+        let ptr = buffer.floatChannelData![0]
+        for i in 0..<silenceFrames { ptr[i] = 0 }
+        for i in 0..<toneFrames {
+            ptr[silenceFrames + i] = sinf(Float(2.0 * .pi * 220.0 * Double(i) / sr)) * 0.5
+        }
+
+        let output = TimeStretch.stretch(buffer, rate: 2.0)
+        let outPtr = output.floatChannelData![0]
+        var firstNonZero = Int(output.frameLength)
+        for i in 0..<Int(output.frameLength) {
+            if abs(outPtr[i]) > 0.05 {
+                firstNonZero = i
+                break
+            }
+        }
+        let expectedOnset = Double(silenceFrames) / 2.0
+        #expect(abs(Double(firstNonZero) - expectedOnset) < 2048,
+                "expected onset near \(Int(expectedOnset)), got \(firstNonZero)")
     }
 }
